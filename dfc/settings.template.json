@@ -1,0 +1,39 @@
+{
+  "_comment": [
+    "Copy this to .claude/settings.json in the repo root before running Phase 2.",
+    "Defence in depth, §6.1 layer 3. The SDK does NOT load this file unless the",
+    "session is constructed with setting_sources=[\"project\"].",
+    "Layer 1 (disallowed_tools) and layer 2 (the PreToolUse hook) are the real",
+    "enforcement; these deny rules exist so a misconfigured SDK call fails safe.",
+    "Note: allowed_tools does not restrict anything under permission_mode",
+    "bypassPermissions - only disallowed_tools and hook denials do (§10)."
+  ],
+  "permissions": {
+    "deny": [
+      "Read",
+      "Edit",
+      "Write",
+      "MultiEdit",
+      "NotebookEdit",
+      "Glob",
+      "Grep",
+      "WebFetch",
+      "WebSearch",
+      "Task"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -m dfc.hook",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}
