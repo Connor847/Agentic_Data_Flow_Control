@@ -1,0 +1,27 @@
+# Virtualenvs
+dfc-env/
+.venv/
+venv/
+
+# The Scale SWE-Bench Pro clone carries its own git history and submodules.
+SWE-bench_Pro-os/
+
+# Harness output
+logs/
+dfc_swebench_run/
+runs/
+*.dfc-canonical.json
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Notebook cruft
+.ipynb_checkpoints/
+*.ipynb.b64
+
+# macOS
+.DS_Store
