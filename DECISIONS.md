@@ -154,3 +154,63 @@ now off the execution path, the probe is inert by construction — the new pipel
 injection code and cannot fabricate the dependent variable. The notebook is left
 byte-identical so the prior run remains reproducible for the record. **Do not re-run the
 notebooks to generate new results.**
+
+---
+
+## D8 — tree-sitter-bash replaces bashlex (2026-08-10)
+
+`bashlex` cannot parse heredocs. It raises `ParsingError: here-document at line 0
+delimited by end-of-file` on `tee f <<'EOF' … EOF`, which §8 Phase 2 mandates for
+*every* write ("use a quoted heredoc for all writes … `echo`/`printf` into `>` is the
+likely cause of syntax-error failures and it is avoidable").
+
+**Decision.** tree-sitter-bash. It parses heredocs natively, exposes `heredoc_body` as
+data so the write payload can be captured, and reports `root_node.has_error` so
+malformed input fails closed under enforcement and open under observation (D5).
+
+---
+
+## D9 — the bash executor is an MCP tool, not the built-in Bash tool (2026-08-11)
+
+Claude Code's built-in `Bash` executes on the **host**. Nothing in the Agent SDK routes
+it into a container. Arm 0 is unrestricted bash, so a host executor means an
+unrestricted agent on the researcher's own machine.
+
+**Decision.** `disallowed_tools=["Bash"]` removes host bash from the model's context
+entirely. An in-process SDK MCP server exposes a single `bash(command)` tool that runs
+`docker exec -w /testbed <cid>`. The failure mode is closed by construction: there is
+no host shell to fall back to, so a bug in our wrapper cannot escalate into host
+execution.
+
+**Sub-decision: the gate moved from the hook into the tool.** §6.1 put the classifier
+in a `PreToolUse` hook because the built-in Bash tool was the executor and a hook was
+the only interposition point. With our own MCP tool as the only path to a shell,
+gating inside it is equally non-bypassable, keeps classification and execution in one
+place so they cannot disagree, and does not depend on `updatedInput` semantics holding
+for MCP tools. The `PreToolUse` hook is still registered, but only to deny the built-in
+file tools (§6.1 layer 3).
+
+**Consequence.** The model sees a tool named `mcp__dfc__bash` rather than `Bash`, with
+our tool description rather than Claude Code's. Commands are still free-form bash
+strings, so the "we police real shells" premise survives, but this is a deviation from
+a stock scaffold and belongs in the paper's threats-to-validity section. It also means
+Arm 3 (Option B, named-tool MCP) is now a *smaller* step than planned rather than a
+different architecture.
+
+**Consequence 2.** `docker exec` is stateless. Working directory is tracked and
+re-injected on every call; exported variables and background jobs do not survive
+between calls, unlike the built-in Bash tool's persistent shell.
+
+---
+
+## D10 — run parameters for the first Phase 2 run (2026-08-11)
+
+Dataset SWE-bench Lite, stratified across repos, seed `20260811`, n=8. Arm 0 only.
+Turn cap of 40; §9 decision 4 (turns vs tokens for budget parity) stays open and is
+answered only for this run.
+
+**Consequence.** A turn cap structurally disadvantages the restricted arms later:
+whole-file rewrites cost more turns than targeted edits, so Arm 1 may lose to turn
+exhaustion rather than to the restriction — the confound §7 explicitly warns about.
+Before the paired arms run, either switch to a token cap or run at least one arm with a
+raised turn budget to see whether the gap closes.
