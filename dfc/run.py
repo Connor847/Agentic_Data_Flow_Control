@@ -120,9 +120,13 @@ def _check_auth() -> bool:
         print("auth              : ok - API key (usage-billed, NOT your subscription)")
         return True
 
-    print("auth              : MISSING - run `claude setup-token` and export "
-          "CLAUDE_CODE_OAUTH_TOKEN")
-    return False
+    # No environment token is not a failure. The CLI has its own stored credential from
+    # `claude login`, and the SDK spawns that CLI. An env token is one way to
+    # authenticate, not the only one - and it is the way that breaks when pasted.
+    print("auth              : no env token - the Claude Code CLI's own login will be "
+          "used if you are signed in")
+    print("                    `python -m dfc.run doctor` is the ground truth here")
+    return True
 
 
 def cmd_preflight(args) -> int:

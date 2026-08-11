@@ -53,8 +53,18 @@ def test_clean_token_passes(monkeypatch, capsys):
     assert "single line" in capsys.readouterr().out
 
 
-def test_missing_token_fails(monkeypatch):
+def test_missing_token_is_not_a_failure(monkeypatch, capsys):
+    """No env token just means the CLI's own stored login will be used. Hard-failing
+    here would push people toward pasting a token, which is the thing that breaks."""
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert run._check_auth() is True
+    assert "doctor" in capsys.readouterr().out
+
+
+def test_malformed_token_still_hard_fails(monkeypatch):
+    """A present-but-broken token is worse than no token: it overrides the CLI login."""
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-abc\ndef")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     assert run._check_auth() is False
 
