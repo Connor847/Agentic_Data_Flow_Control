@@ -209,11 +209,19 @@ def _file_redirect(node, src: bytes) -> Redirect:
     for child in node.children:
         if child.type == "file_descriptor":
             fd = int(_node_text(child, src))
-        elif child.type in (">", ">>", "<", "&>", ">&", "<<<"):
+        elif child.type in (">", ">>", "<", "&>", ">&", "<&", "<<<"):
             op = child.type
         elif child.type in _WORD_TYPES:
             target = _extract_word(child, src)
-    kind = {">": ">", ">>": ">>", "<": "<", "&>": ">", ">&": ">", "<<<": "<"}.get(op, op)
+
+    # `2>&1` and `>&2` duplicate a file descriptor. They are not writes to files named
+    # "1" or "2" - treating them as such fabricates write edges in the flow log, which
+    # is exactly the kind of invented dependent variable this rewrite exists to remove.
+    if op in (">&", "<&") and target is not None and target.text.isdigit():
+        return Redirect(kind="fd-dup", target=target, fd=fd)
+
+    kind = {">": ">", ">>": ">>", "<": "<", "&>": ">", ">&": ">", "<&": "<",
+            "<<<": "<"}.get(op, op)
     return Redirect(kind=kind, target=target, fd=fd)
 
 
@@ -339,9 +347,12 @@ def _classify_one(sc: SimpleCommand, arm: policy.Arm) -> CmdResult:
     # ---- grep ---------------------------------------------------------
     if argv0 == "grep":
         if any(w.text in ("-f", "--file") for w in args):
-            return CmdResult([], False,
-                             "grep -f loads patterns from a file; the pattern is the "
-                             "audit record and must be on the command line")
+            return CmdResult(
+                [act(Verb.SEARCH, [Target(TargetKind.OPAQUE, sc.raw, extractable=False,
+                                          why_opaque="grep -f: patterns come from a file")])],
+                False,
+                "grep -f loads patterns from a file; the pattern is the "
+                "audit record and must be on the command line")
         pos = _positional(args, _GREP_VALUE_FLAGS)
         pattern = pos[0].text if pos else ""
         files = pos[1:]
@@ -393,7 +404,15 @@ def _classify_one(sc: SimpleCommand, arm: policy.Arm) -> CmdResult:
         script = pos[0].text if pos else ""
         files = pos[1:]
         if not in_place:
-            return CmdResult([], False,
+            # Still a READ of every input file. Emitting nothing here left a silent
+            # hole in the flow log: `sed -n '55,100p' f` is the agent's most common
+            # read idiom and it was recorded with no flow edge at all.
+            targets = [_path_target(w.text, w) for w in files] or [
+                Target(TargetKind.STDIN, "-", label=DEFAULT_FILE)
+            ]
+            a = act(Verb.READ, targets)
+            a.notes = f"stream sed script={script!r}"
+            return CmdResult([a], False,
                              "stream `sed` is not a primitive; fold onto restricted awk")
         ok, why = policy.sed_admissible(script, arg_texts, arm)
         targets = [_path_target(w.text, w) for w in files]
@@ -414,7 +433,8 @@ def _classify_one(sc: SimpleCommand, arm: policy.Arm) -> CmdResult:
                              f"`git {sub}` is a network edge, not an infrastructure command")
         if sub in policy.GIT_ALLOWED_SUBCOMMANDS:
             return CmdResult([act(Verb.NONFLOW, [_path_target(".")])], True)
-        return CmdResult([], False, f"`git {sub}` is not on the infrastructure allowlist")
+        return CmdResult([act(Verb.READ, [_path_target(".git")])], False,
+                         f"`git {sub}` is not on the infrastructure allowlist")
 
     # ---- python / pytest ----------------------------------------------
     if argv0 in policy.PYTHON_NAMES:
@@ -428,8 +448,16 @@ def _classify_one(sc: SimpleCommand, arm: policy.Arm) -> CmdResult:
             )
         if arg_texts[:2] == ["-m", "pytest"] or "pytest" in arg_texts[:2]:
             return CmdResult([_execute_action(sc, argv0)], True)
-        return CmdResult([], False,
-                         "`python` is admissible only as `-m pytest`, the test entry point")
+        # `python - <<'EOF'` reads its program from stdin. It is `python3 -c` wearing a
+        # heredoc, and it is the composition escape of §6.4 appearing as the agent's
+        # main editing path - so it must be recorded, not silently dropped.
+        why = ("python reads its program from stdin (`python -`)"
+               if "-" in arg_texts else f"`{argv0}` is not a test entry point")
+        return CmdResult(
+            [act(Verb.EXECUTE, [Target(TargetKind.OPAQUE, sc.raw, extractable=False,
+                                       why_opaque=why)])],
+            False,
+            "`python` is admissible only as `-m pytest`, the test entry point")
 
     if argv0 == "pytest":
         return CmdResult([_execute_action(sc, argv0)], True)
@@ -535,7 +563,11 @@ def _redirect_actions(sc: SimpleCommand) -> list[Action]:
     """Redirects are edges in their own right. `>` is not a command (§10)."""
     out: list[Action] = []
     for r in sc.redirects:
-        if r.kind in (">", ">>"):
+        if r.kind == "fd-dup":
+            a = Action(verb=Verb.NONFLOW, targets=[], raw=sc.raw, argv0=sc.argv0)
+            a.notes = f"file-descriptor duplication {r.fd or ''}>&{r.target.text if r.target else ''}"
+            out.append(a)
+        elif r.kind in (">", ">>"):
             if r.target is None:
                 continue
             t = _path_target(r.target.text, r.target)
@@ -593,6 +625,18 @@ def classify(command: str, arm: policy.Arm, *, session_id: str = "",
                         session_id=session_id, instance_id=instance_id)
 
     results = [(sc, _classify_one(sc, arm)) for sc in cmds]
+
+    # Safety net. A command that produces no flow edge is invisible in the flow log,
+    # and under observe mode (D5) that silently shrinks the coverage denominator and
+    # leaves a real read unaudited. Nothing may pass through unrecorded.
+    for sc, res in results:
+        if not res.actions:
+            res.actions.append(Action(
+                verb=Verb.EXECUTE, raw=sc.raw, argv0=sc.argv0,
+                targets=[Target(TargetKind.OPAQUE, sc.raw, extractable=False,
+                                why_opaque="unclassified command")],
+            ))
+
     actions: list[Action] = []
     for sc, res in results:
         actions.extend(res.actions)
