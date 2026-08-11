@@ -396,6 +396,22 @@ def _classify_one(sc: SimpleCommand, arm: policy.Arm) -> CmdResult:
         acts.append(a)
         return CmdResult(acts, ok, "" if ok else why)
 
+    # ---- head / tail (D11, stdin form only) ---------------------------
+    if argv0 in policy.STREAM_TRUNCATORS:
+        if argv0 not in arm.primitives and arm.mode == "enforce":
+            return CmdResult([], False, f"`{argv0}` is not admitted in this arm")
+        files = [w for w in _positional(args, frozenset({"-n", "-c"})) if not w.is_flag]
+        ok, why = policy.stream_truncator_admissible([w.text for w in files])
+        if not ok:
+            # Named a file, so it is a READ. Denied here so the canon table can fold it
+            # onto `grep -m N ""`, which is the admissible form.
+            return CmdResult([act(Verb.READ, [_path_target(w.text, w) for w in files])],
+                             False, why)
+        a = act(Verb.TRANSFORM, [Target(TargetKind.STDIN, "-", label=DEFAULT_FILE)])
+        a.notes = ("stream truncation: no file operand, so no target to extract and no "
+                   "data reachable that the upstream command did not already log")
+        return CmdResult([a], True)
+
     # ---- sed ----------------------------------------------------------
     if argv0 == "sed":
         arg_texts = [w.text for w in args]
@@ -474,8 +490,10 @@ def _classify_one(sc: SimpleCommand, arm: policy.Arm) -> CmdResult:
                                    why_opaque=f"`{argv0}` is not a primitive")])],
         False,
         f"`{argv0}` is outside the policed primitive set. Allowed: ls, grep, curl, "
-        "tee/>, restricted awk"
-        + (", scoped sed -i" if arm.allow_sed_inplace else ""),
+        "tee/> (use `tee path <<'EOF'` to write a file), restricted awk, "
+        "head/tail on a pipe"
+        + (", address-scoped sed -i" if arm.allow_sed_inplace else "")
+        + ". Tests run with pytest.",
     )
 
 

@@ -34,7 +34,29 @@ PRIMITIVE_VERBS: dict[str, Verb] = {
     "awk": Verb.TRANSFORM,    # D3 - restricted form only, see awk_admissible()
     "sed": Verb.WRITE,        # Arm 2 only, and only scoped -i; see sed_admissible()
     "curl": Verb.FETCH,       # refined by the classifier into FETCH / WRITE(external)
+    "head": Verb.TRANSFORM,   # D11 - stdin form only; see stream_truncator_admissible()
+    "tail": Verb.TRANSFORM,   # D11 - stdin form only
 }
+
+#: D11 - `head`/`tail` are admissible **only** with no file operand.
+#:
+#: `head -20 f.py` names a target and is a READ; it folds onto `grep -m 20 ""`.
+#: `cmd | head -20` names nothing. It reads the pipe, never opens a file, and cannot
+#: reach data the upstream command did not already read and log. Its target set is
+#: empty, so "all targets statically extractable" holds vacuously, and the verb is
+#: unambiguously one. Unlike `awk` it has no escape surface at all - it can only
+#: truncate - so no analogue of D3's seven clauses is needed.
+STREAM_TRUNCATORS = frozenset({"head", "tail"})
+
+
+def stream_truncator_admissible(files: list[str]) -> tuple[bool, str]:
+    """Admissible iff there is no file operand."""
+    if files:
+        return False, (
+            f"`head`/`tail` with a file operand is a READ of {files[0]}; "
+            'fold onto `grep -m N ""` instead'
+        )
+    return True, ""
 
 #: D6 - fixed infrastructure allowlist, byte-identical across every arm.
 #: Allowed and logged, but not counted as a policed flow edge. No arm config may
@@ -96,7 +118,7 @@ ARM0 = Arm(
 ARM1 = Arm(
     name="arm1-primitives",
     mode="enforce",
-    primitives=frozenset({"ls", "grep", "curl", "tee", "awk"}),
+    primitives=frozenset({"ls", "grep", "curl", "tee", "awk", "head", "tail"}),
 )
 
 #: Arm 2 - Arm 1 plus address-scoped `sed -i`. The delta between the arms is the
@@ -104,7 +126,7 @@ ARM1 = Arm(
 ARM2 = Arm(
     name="arm2-scoped-sed",
     mode="enforce",
-    primitives=frozenset({"ls", "grep", "curl", "tee", "awk", "sed"}),
+    primitives=frozenset({"ls", "grep", "curl", "tee", "awk", "sed", "head", "tail"}),
     allow_sed_inplace=True,
 )
 

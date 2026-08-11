@@ -34,12 +34,20 @@ def test_bucket_histogram_stable():
 
 
 def test_lossy_rules_flagged():
-    """D4: Partial and Limitation are the non-equivalent rewrites."""
+    """D4: Partial and Limitation are the non-equivalent rewrites.
+
+    Went from 14 to 16 when the rules were widened on 2026-08-11: `cat_read` now
+    accepts multiple files (grep prefixes each line with the filename) and
+    `find_enumerate` now accepts name filters (ls -R returns a superset). Both
+    widenings buy coverage at the price of fidelity, so both must carry the flag.
+    """
     lossy = [r.name for r in canon.RULES if r.fidelity_risk]
-    assert len(lossy) == 14
+    assert len(lossy) == 16
     assert "cp_copy" not in lossy          # Verified: byte-identical content
     assert "du_size" in lossy              # Partial: du aggregates, ls does not
     assert "file_magic" in lossy           # Limitation: reads content, not metadata
+    assert "cat_read" in lossy             # Partial since the multi-file widening
+    assert "find_enumerate" in lossy       # Partial: name filter dropped
 
 
 def test_only_binary_dump_lands_in_python3c_among_rewrites():

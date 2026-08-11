@@ -214,3 +214,79 @@ whole-file rewrites cost more turns than targeted edits, so Arm 1 may lose to tu
 exhaustion rather than to the restriction — the confound §7 explicitly warns about.
 Before the paired arms run, either switch to a token cap or run at least one arm with a
 raised turn budget to see whether the gap closes.
+
+---
+
+## D11 — `head` / `tail` admitted on stdin only (2026-08-11)
+
+Replaying the first Arm 0 run showed pipeline `head`/`tail` accounting for 11 of 38
+Arm 1 denials — 29% of the denial rate — with no data-flow consequence whatsoever.
+
+`head -20 f.py` names a file: it opens it, so it is a READ of an extractable target and
+folds onto `grep -m 20 "" f.py`. `cmd | head -20` names nothing. It reads the pipe,
+never opens a file, and cannot reach any data the upstream command did not already read
+and log. Its target set is empty, so "all targets statically extractable" holds
+vacuously and the verb is unambiguously one.
+
+**Decision.** Admit `head` and `tail` as `transform` primitives **iff there is no file
+operand**. With a file operand they remain denied so the canon table folds them onto
+`grep -m N ""`.
+
+Unlike `awk` (D3), no clause list is needed: `head` and `tail` have no escape surface.
+They cannot call out, redirect, or open anything. The single condition — no file operand
+— is the whole restriction.
+
+**Consequence.** The primitive set now has more members than §2 enumerates. The paper
+must state the set as `ls, grep, curl, tee/>, restricted awk, head/tail on stdin`, plus
+scoped `sed -i` in Arm 2, with the stdin-only condition explicit. Coverage rose from
+44.1% to 65.0% on the same 177 real commands.
+
+---
+
+## D12 — Restricted arms are told the allowed command set (2026-08-11)
+
+The first Arm 0 run edited files **exclusively** with `python - <<'EOF'` — 14 times in
+70 commands — and used `tee` exactly **zero** times. This is §6.4's composition problem
+appearing as the agent's main path, precisely as the plan predicted: "on SWE-bench this
+is not an edge case: write-a-file-then-run-it is the literal task."
+
+Under Arm 1 that strategy is denied. Without being told the allowed set, the agent must
+rediscover the write idiom from denial messages, and the measurement then prices
+*unfamiliarity* alongside *restriction*. §7 already warns that a restricted arm can lose
+to turn exhaustion rather than to the restriction itself, and at a 40-turn cap that is a
+live risk rather than a theoretical one.
+
+**Decision.** Enforcing arms get a block appended to the system prompt naming every
+allowed command and showing the `tee path <<'EOF'` write idiom. Arm 2 additionally gets
+the scoped `sed -i` form. Arm 0's prompt is untouched.
+
+**Consequence, and it is a real cost.** The arms now differ in **two** deliberate ways:
+the gate and the prompt. §7's "the only difference vs. treatment is the restriction
+itself" no longer holds literally, and the paper must say so. The defence is that an
+undocumented toolset is not what a deployed system would look like, and that measuring
+an agent's confusion is not measuring the restriction. The clean alternative — an
+informed/naive sub-arm pair — remains available and would price the difference directly.
+
+Related: the Arm 1 vs Arm 2 delta, which the plan calls the headline number, was
+**identically zero** on the observed traffic, because the agent used `sed -i` once in
+177 commands and `python` instead. Without D12's Arm 2 prompt block, that delta would
+measure nothing.
+
+---
+
+## D13 — Three canon rules widened against observed traffic (2026-08-11)
+
+Several denials turned out to be narrow regexes rather than policy: `find -iname` did
+not match a rule requiring `-type f`; `cat a.py b.py` did not match a rule requiring
+exactly one operand; `head -50` did not match a rule requiring `-n`.
+
+**Decision.** Widen rows 1, 2 and 10 to cover the forms their CSV descriptions plainly
+intend. Each widening carries an inline `WIDENED 2026-08-11` note so the diff against
+the original sheet stays visible.
+
+**Consequence.** Two of the three become lossy and are now flagged under D4:
+`cat` over multiple files rewrites to a `grep ""` that prefixes each line with the
+filename (content preserved, framing not), and `find` with a name filter rewrites to
+`ls -R`, which returns a **superset** of the matching paths. The count of
+fidelity-flagged rules went from 14 to 16. These widenings buy coverage at a price, and
+the price is recorded per-record rather than hidden.

@@ -56,6 +56,67 @@ usual cause of syntax errors introduced by `echo` or `printf` into `>`.
 - Do not commit. Leave your changes in the working tree.
 - Stop when the tests relevant to the issue pass."""
 
+#: D12 - appended for enforcing arms only.
+#:
+#: The first Arm 0 run showed the agent editing files exclusively by piping a Python
+#: script to stdin (`python - <<'EOF'`), never once using `tee`. Under Arm 1 that is
+#: denied, and without this block the agent would have to rediscover the write idiom
+#: from denial messages - so the measurement would price unfamiliarity as well as
+#: restriction. §7 already warns that a restricted arm can lose to turn exhaustion
+#: rather than to the restriction itself.
+RESTRICTED_PROMPT = """
+
+## Available commands
+
+This environment allows a restricted set of shell commands. Anything else is refused \
+with an explanation, and the refusal costs you a turn - so work within this set.
+
+| Need | Use |
+|---|---|
+| List files | `ls`, `ls -R` |
+| Search file contents | `grep PAT path`, `grep -R PAT dir/` |
+| Read a whole file | `grep "" path` |
+| Read the first N lines | `grep -m N "" path` |
+| Write or overwrite a file | `tee path <<'EOF'` … `EOF` |
+| Append to a file | `tee -a path <<'EOF'` … `EOF` |
+| Transform a stream | `awk '...'` (no `system()`, no redirection, no `getline`) |
+| Shorten output | pipe into `head -N` or `tail -N` |
+| Run tests | `pytest ...` or `python -m pytest ...` |
+| Navigate, inspect | `cd`, `pwd`, `git status`, `git diff` |
+
+**Writing files is the part that differs most from habit.** There is no editor and no \
+`python` interpreter available for scripting edits. To change a file, read it, then \
+write the whole file back with a quoted heredoc:
+
+```
+tee path/to/file.py <<'EOF'
+<the complete new contents of the file>
+EOF
+```
+
+The quoted delimiter (`<<'EOF'`, not `<<EOF`) matters: it stops the shell expanding \
+`$`, backticks and backslashes inside your file content."""
+
+#: D12 - Arm 2 additionally gets the in-place editor, which removes the whole-file
+#: rewrite tax. The delta between the arms is the headline number.
+SED_PROMPT = """
+
+Arm note: you may also edit in place with `sed -i`, restricted to address-scoped \
+`s///`, `d`, `i` and `a` commands - for example `sed -i '42s/old/new/' path/to/file.py`. \
+This avoids rewriting a whole file to change a few lines."""
+
+
+def system_prompt_for(arm) -> str:
+    """§7 requires the arms differ in exactly one *intended* way. D12 makes the prompt a
+    second deliberate difference, so it must be stated: the restricted arms are told
+    what they may use, the baseline is not told anything it could not already do."""
+    if arm.mode == "observe":
+        return SYSTEM_PROMPT
+    prompt = SYSTEM_PROMPT + RESTRICTED_PROMPT
+    if arm.allow_sed_inplace:
+        prompt += SED_PROMPT
+    return prompt
+
 USER_PROMPT = """Fix the following issue in the repository at /testbed.
 
 <issue>
@@ -129,7 +190,7 @@ async def solve(
 
     options = ClaudeAgentOptions(
         model=MODEL,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=system_prompt_for(arm),
         mcp_servers={bashtool.SERVER_NAME: server},
         allowed_tools=[bashtool.QUALIFIED],
         disallowed_tools=DISALLOWED,
@@ -187,4 +248,4 @@ def arm_from_name(name: str) -> Arm:
 
 
 __all__ = ["solve", "Trajectory", "arm_from_name", "DISALLOWED", "MODEL",
-           "SYSTEM_PROMPT"]
+           "SYSTEM_PROMPT", "RESTRICTED_PROMPT", "SED_PROMPT", "system_prompt_for"]

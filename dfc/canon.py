@@ -137,10 +137,16 @@ RULES: list[Rule] = [
          _rx(r"^(cat\s+-n|nl)\s+(?P<f>\S+)"),
          lambda m: 'grep -n "" %s' % m.group("f"), "Partial",
          "grep -n 'N:' vs nl padded tab; content equivalent."),
+    # WIDENED 2026-08-11: the original regex required the `-n` form with an explicit
+    # file, so `head -50 f.py` and `head f.py` both fell through to a denial. Row 2
+    # plainly intends to cover `head` reading a named file; this matches all three
+    # spellings. Pipeline `head` (no file operand) is handled by D11, not here.
     Rule("head_first_n", 2, "grep", "READ", "MED", True,
-         _rx(r"^head\s+-n\s+(?P<n>\d+)\s+(?P<f>\S+)"),
-         lambda m: 'grep -m %s "" %s' % (m.group("n"), m.group("f")), "Verified",
-         "grep -m stops after N matches = head for line text."),
+         _rx(r"^head\s+(?:-n\s*(?P<n>\d+)|-(?P<n2>\d+))?\s*(?P<f>[^\s|<>-]\S*)\s*$"),
+         lambda m: 'grep -m %s "" %s' % (m.group("n") or m.group("n2") or "10",
+                                         m.group("f")), "Verified",
+         "grep -m stops after N matches = head for line text. Default N=10 matches "
+         "head's own default."),
     Rule("pager_read", 4, "grep", "READ", "MED", True,
          _rx(r"^(less|more)\s+(?P<f>\S+)"),
          lambda m: 'grep "" %s' % m.group("f"), "Verified",
@@ -169,11 +175,17 @@ RULES: list[Rule] = [
     Rule("file_magic", 15, "grep", "READ", "MED", True,
          _rx(r"^file\s+(?P<f>\S+)"), None, "Limitation",
          "`file` reads content bytes to classify -> READ, not metadata."),
+    # WIDENED 2026-08-11: the original regex required exactly one operand, so
+    # `cat a.py b.py` and `cat dir/*.rst` fell through to a denial. `grep ""` accepts
+    # multiple files and globs, and row 1 plainly intends to cover reading files.
+    # Note the output differs for multiple files: grep prefixes each line with the
+    # filename, so this is Partial rather than Verified in the multi-file case.
     Rule("cat_read", 1, "grep", "READ", "MED", True,
-         _rx(r"^cat\s+(?P<f>\S+)\s*$"),
-         lambda m: 'grep "" %s' % m.group("f"), "Verified",
-         "Faithful; grep adds trailing newline if source lacks one. "
-         "grep . is NOT equivalent (drops blanks)."),
+         _rx(r"^cat\s+(?P<f>[^|<>]+?)\s*$"),
+         lambda m: 'grep "" %s' % m.group("f").strip(), "Partial",
+         "Faithful for one file; grep adds a trailing newline if the source lacks one. "
+         "For multiple files grep prefixes each line with the filename, so content is "
+         "preserved but framing differs. grep . is NOT equivalent (drops blanks)."),
 
     # ---- WRITE: > / tee (and in-place sed -i) -----------------------------
     Rule("echo_append", 18, "tee", "WRITE", "MED", True,
@@ -210,10 +222,18 @@ RULES: list[Rule] = [
          "tee writes file(s) AND stdout; policy must catch BOTH sinks."),
 
     # ---- METADATA: ls (names/sizes/perms only) ----------------------------
+    # WIDENED 2026-08-11: the original regex required `-type f`, so the very common
+    # `find DIR -iname "*pat*"` and `find DIR -name ...` fell through to a denial.
+    # Row 10 intends to cover enumeration; the name filter is a predicate over the same
+    # path set, not a different kind of access. Filtering is lost in the rewrite, hence
+    # Partial: `ls -R` returns a superset of what the name filter would have matched.
     Rule("find_enumerate", 10, "ls", "METADATA", "LOW", True,
-         _rx(r"^find\s+(?P<d>\S+)\s+-type\s+f"),
-         lambda m: "ls -R %s" % m.group("d"), "Verified",
-         "Same path set; ./ prefix + ordering differ. -exec/-delete handled as escape."),
+         _rx(r"^find\s+(?P<d>\S+)(?=\s+-(?:type|i?name|maxdepth|mindepth|path)\b)"
+             r"(?![^|;]*\s-(?:exec|execdir|delete|ok|fprint)\b)(?P<rest>[^|;]*)"),
+         lambda m: "ls -R %s" % m.group("d"), "Partial",
+         "Same path set, but the name/type filter is dropped: ls -R returns a superset. "
+         "./ prefix and ordering also differ. -exec/-delete are matched earlier and "
+         "handled as escapes."),
     Rule("stat_size", 11, "ls", "METADATA", "LOW", True,
          _rx(r"^stat\s+-c\s+'?%s'?\s+(?P<f>\S+)"),
          lambda m: "ls -l %s" % m.group("f"), "Partial",
