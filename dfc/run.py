@@ -81,6 +81,50 @@ def classify_failure(traj: dict, report: dict | None, denial_rate: float,
 # preflight
 # --------------------------------------------------------------------------
 
+def _check_auth() -> bool:
+    """Validate the token's *shape*, not just its presence.
+
+    A token pasted from a wrapped terminal carries an embedded newline. The CLI then
+    fails with `Invalid Authorization header value ... it contains a line break`, the
+    model gets no tools, and every trajectory returns one turn, zero commands and zero
+    cost - which looks exactly like a harness bug and is not one.
+    """
+    oauth = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
+
+    if oauth and key:
+        print("auth              : ! both CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY "
+              "are set; set only one")
+
+    for name, value in (("CLAUDE_CODE_OAUTH_TOKEN", oauth), ("ANTHROPIC_API_KEY", key)):
+        if not value:
+            continue
+        bad = [c for c in ("\n", "\r", "\t", " ") if c in value]
+        if bad or value != value.strip():
+            where = value.find("\n") if "\n" in value else value.find(" ")
+            print(f"auth              : BROKEN - {name} contains whitespace"
+                  f"{f' at character {where}' if where >= 0 else ''}. "
+                  f"({len(value)} chars, {len(value.splitlines())} lines)")
+            print("                    fix: export "
+                  f"{name}=$(claude setup-token | tr -d '[:space:]')")
+            return False
+
+    if oauth:
+        if not oauth.startswith("sk-ant-"):
+            print(f"auth              : ! CLAUDE_CODE_OAUTH_TOKEN does not start with "
+                  f"sk-ant- (starts {oauth[:8]!r})")
+        print(f"auth              : ok - subscription OAuth token ({len(oauth)} chars, "
+              "single line)")
+        return True
+    if key:
+        print("auth              : ok - API key (usage-billed, NOT your subscription)")
+        return True
+
+    print("auth              : MISSING - run `claude setup-token` and export "
+          "CLAUDE_CODE_OAUTH_TOKEN")
+    return False
+
+
 def cmd_preflight(args) -> int:
     """Check everything that costs nothing to check, before anything that costs quota."""
     ok = True
@@ -101,19 +145,7 @@ def cmd_preflight(args) -> int:
         print(f"claude-agent-sdk  : MISSING ({exc})")
         ok = False
 
-    has_oauth = bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"))
-    has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
-    if has_oauth and has_key:
-        print("auth              : ! both CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY "
-              "are set; set only one")
-    elif has_oauth:
-        print("auth              : ok - subscription OAuth token")
-    elif has_key:
-        print("auth              : ok - API key (usage-billed, not your subscription)")
-    else:
-        print("auth              : MISSING - run `claude setup-token` and export "
-              "CLAUDE_CODE_OAUTH_TOKEN")
-        ok = False
+    ok &= _check_auth()
 
     try:
         import tree_sitter_bash  # noqa: F401
@@ -140,7 +172,75 @@ def cmd_preflight(args) -> int:
         ok = False
 
     print("\npreflight:", "PASS" if ok else "FAIL")
+    if ok:
+        print("next: python -m dfc.run doctor   (one live call - proves auth and MCP "
+              "wiring before you spend quota on 8 instances)")
     return 0 if ok else 1
+
+
+# --------------------------------------------------------------------------
+# doctor - one live round trip, no Docker
+# --------------------------------------------------------------------------
+
+async def _doctor() -> tuple[bool, str]:
+    """Prove auth *and* MCP tool wiring with a single cheap call.
+
+    Deliberately does not touch Docker. If this passes and a real run still shows zero
+    commands, the problem is the container layer, not the SDK.
+    """
+    from claude_agent_sdk import (ClaudeAgentOptions, ClaudeSDKClient,
+                                  create_sdk_mcp_server, tool as sdk_tool)
+
+    seen: list[str] = []
+    stderr_lines: list[str] = []
+
+    @sdk_tool("ping", "Return the word PONG. Call this exactly once.", {"note": str})
+    async def _ping(args):
+        seen.append(args.get("note", ""))
+        return {"content": [{"type": "text", "text": "PONG"}]}
+
+    server = create_sdk_mcp_server(name="doctor", version="0.1.0", tools=[_ping])
+    options = ClaudeAgentOptions(
+        model=solver.MODEL,
+        system_prompt="You are a test harness. Use the tools you are given.",
+        mcp_servers={"doctor": server},
+        allowed_tools=["mcp__doctor__ping"],
+        disallowed_tools=solver.DISALLOWED,
+        permission_mode="bypassPermissions",
+        max_turns=3,
+        setting_sources=[],
+        strict_mcp_config=True,
+        stderr=lambda line: stderr_lines.append(line),
+    )
+
+    text = ""
+    async with ClaudeSDKClient(options=options) as client:
+        await client.query("Call the ping tool once with note='hello', then reply DONE.")
+        async for message in client.receive_response():
+            if type(message).__name__ == "AssistantMessage":
+                for block in getattr(message, "content", []) or []:
+                    if getattr(block, "text", None):
+                        text = block.text
+    return bool(seen), (text or "\n".join(stderr_lines[-5:]))
+
+
+def cmd_doctor(args) -> int:
+    try:
+        called, text = asyncio.run(_doctor())
+    except Exception as exc:
+        print(f"doctor: FAILED to start a session\n  {type(exc).__name__}: {exc}")
+        return 1
+
+    if called:
+        print("doctor: PASS - the model authenticated and called the MCP tool")
+        return 0
+
+    print("doctor: FAIL - session ran but the tool was never called")
+    print(f"  model said: {text[:400]}")
+    if "auth" in text.lower() or "token" in text.lower():
+        print("  -> this is an auth problem, not a tool-wiring problem. "
+              "Re-export the token on a single line.")
+    return 1
 
 
 # --------------------------------------------------------------------------
@@ -149,6 +249,7 @@ def cmd_preflight(args) -> int:
 
 async def _solve_all(instances, arm, run_dir: Path, args) -> list[dict]:
     trajectories: list[dict] = []
+    dead = 0
     for i, inst in enumerate(instances, 1):
         iid = inst["instance_id"]
         print(f"[{i}/{len(instances)}] {iid} ... ", end="", flush=True)
@@ -183,16 +284,46 @@ async def _solve_all(instances, arm, run_dir: Path, args) -> list[dict]:
             )
             d = traj.as_dict()
             stats = d.get("tool_stats", {})
+
+            # A trajectory that never ran a command is not a model failure - it is a
+            # broken session. Reporting it as a clean result is how a bad auth token
+            # burns a whole run before anyone notices.
+            if stats.get("calls", 0) == 0:
+                d["error"] = d["error"] or _zero_call_reason(d)
+                d["stop_reason"] = "harness-error"
+                dead += 1
+            else:
+                dead = 0
+
             print(f"{d['turns']} turns, {stats.get('calls', 0)} cmds, "
                   f"{stats.get('denials', 0)} denied, "
                   f"{len(d['model_patch'])}b patch"
-                  + (f", ERROR {d['error']}" if d["error"] else ""))
+                  + (f", ERROR {d['error'][:120]}" if d["error"] else ""))
             trajectories.append(d)
         finally:
             cont.stop()
 
         (run_dir / "trajectories.json").write_text(json.dumps(trajectories, indent=2))
+
+        if dead >= 2:
+            print(f"\nAborting: {dead} consecutive trajectories ran zero commands. "
+                  "The session is broken, not the model.\n"
+                  "Run `python -m dfc.run doctor` to isolate auth from tool wiring.")
+            break
     return trajectories
+
+
+def _zero_call_reason(traj: dict) -> str:
+    """Turn the model's own error text into a diagnosis."""
+    text = (traj.get("final_text") or "").strip()
+    low = text.lower()
+    if "line break" in low or "invalid authorization header" in low:
+        return ("auth: the token contains a line break. Re-export with "
+                "`export CLAUDE_CODE_OAUTH_TOKEN=$(claude setup-token | tr -d '[:space:]')`"
+                f" | model said: {text[:200]}")
+    if "auth" in low or "token" in low or "credit" in low or "rate limit" in low:
+        return f"auth or quota problem | model said: {text[:200]}"
+    return f"session produced no tool calls | model said: {text[:200]}"
 
 
 def cmd_solve(args) -> int:
@@ -373,6 +504,8 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("preflight", help="check docker, auth and deps").set_defaults(
         func=cmd_preflight)
+    sub.add_parser("doctor", help="one live SDK call, no Docker - proves auth and MCP "
+                                  "wiring").set_defaults(func=cmd_doctor)
 
     s = sub.add_parser("solve", help="run trajectories")
     s.add_argument("--n", type=int, default=8)

@@ -43,9 +43,20 @@ The Agent SDK reads a subscription OAuth token from the environment. Generate on
 once; it is valid for a year.
 
 ```bash
-claude setup-token          # opens a browser, prints a token starting sk-ant-oat01-
-export CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-...'
+export CLAUDE_CODE_OAUTH_TOKEN=$(claude setup-token | tr -d '[:space:]')
+
+# verify: one line, ~108-110 characters
+echo -n "$CLAUDE_CODE_OAUTH_TOKEN" | wc -c
+echo "$CLAUDE_CODE_OAUTH_TOKEN" | wc -l
 ```
+
+**Do not paste the token by hand.** A token copied out of a wrapped terminal carries an
+embedded newline, and the CLI then refuses it with `Invalid Authorization header value
+... it contains a line break`. The model gets no tools, answers once with the error
+text, and stops — every instance comes back with one turn, zero commands and zero cost,
+which reads exactly like a harness bug. `preflight` now checks the token's shape, and
+`solve` aborts after two consecutive zero-command trajectories rather than working
+through the whole sample.
 
 Set **either** `CLAUDE_CODE_OAUTH_TOKEN` **or** `ANTHROPIC_API_KEY`, never both. With
 only the OAuth token set, the run draws on your Pro/Max subscription rather than
@@ -74,9 +85,20 @@ capped at 4 GB and 2 CPUs.
 python -m dfc.run preflight
 ```
 
-Checks Python version, Docker daemon, the SDK, auth, the classifier, `datasets`, and
-`swebench`. Everything it checks is free; everything after this costs quota or time.
-Do not proceed on a FAIL.
+Checks Python version, Docker daemon, the SDK, auth token *shape*, the classifier,
+`datasets`, and `swebench`. Everything it checks is free; everything after this costs
+quota or time. Do not proceed on a FAIL.
+
+Then prove the session actually works, with one live call and no Docker:
+
+```bash
+python -m dfc.run doctor
+```
+
+This starts a real SDK session with a trivial MCP tool and checks the model calls it.
+It separates the two things that both present as "zero commands": authentication, and
+tool wiring. If `doctor` passes but a real run still shows zero commands, the problem is
+the container layer.
 
 ## 5. Solve
 

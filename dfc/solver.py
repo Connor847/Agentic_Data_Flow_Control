@@ -80,6 +80,10 @@ class Trajectory:
     dirty_paths: list[str] = field(default_factory=list)
     error: str = ""
     final_text: str = ""
+    #: Last lines of CLI stderr. Kept because a session that fails to authenticate
+    #: reports it here and nowhere else, and without it a broken run looks like a
+    #: model failure.
+    stderr_tail: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         d = dict(self.__dict__)
@@ -121,6 +125,8 @@ async def solve(
     )
     server = bashtool.make_server(tool)
 
+    stderr_lines: list[str] = []
+
     options = ClaudeAgentOptions(
         model=MODEL,
         system_prompt=SYSTEM_PROMPT,
@@ -135,6 +141,7 @@ async def solve(
         strict_mcp_config=True,
         cwd=settings_dir or os.getcwd(),
         env={"DFC_ARM": arm.name, "DFC_INSTANCE_ID": instance_id},
+        stderr=lambda line: stderr_lines.append(line),
     )
 
     started = time.time()
@@ -158,6 +165,7 @@ async def solve(
 
     traj.duration_s = time.time() - started
     traj.tool_stats = tool.stats()
+    traj.stderr_tail = stderr_lines[-20:]
 
     # §8 R5 - the patch comes from git, never from the model.
     try:
