@@ -245,6 +245,10 @@ class Decision:
     arm: str = ""
     parse_ok: bool = True
     parse_error: str = ""
+    #: The command that caused a denial. `cd /repo && python - <<EOF` is denied for the
+    #: `python`, and crediting `cd` too corrupts the "what do agents reach for" metric
+    #: that is meant to drive a v2 primitive set (§7).
+    denied_by: str = ""
     ts: float = field(default_factory=time.time)
     id: str = field(default_factory=lambda: f"act-{uuid.uuid4().hex[:8]}")
     session_id: str = ""
@@ -280,10 +284,12 @@ class Decision:
 
     def as_record(self) -> dict[str, Any]:
         """One line of the flow log (JSONL)."""
+        from .version import classifier_fingerprint
         rec: dict[str, Any] = {
             "id": self.id,
             "ts": self.ts,
             "arm": self.arm,
+            "cls": classifier_fingerprint(),
             "session_id": self.session_id,
             "instance_id": self.instance_id,
             "outcome": self.outcome.value,
@@ -300,6 +306,8 @@ class Decision:
             rec["reason"] = self.reason
         if self.parse_error:
             rec["parse_error"] = self.parse_error
+        if self.denied_by:
+            rec["denied_by"] = self.denied_by
         return rec
 
     def as_json(self) -> str:

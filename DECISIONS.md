@@ -290,3 +290,53 @@ filename (content preserved, framing not), and `find` with a name filter rewrite
 `ls -R`, which returns a **superset** of the matching paths. The count of
 fidelity-flagged rules went from 14 to 16. These widenings buy coverage at a price, and
 the price is recorded per-record rather than hidden.
+
+---
+
+## D14 — Turn cap raised to 100; four pilot defects fixed (2026-08-11)
+
+The n=8 pilot (Arm 0 5/8, Arm 1 4/8) surfaced four defects that would have corrupted a
+larger run. None affected the pilot's resolve rates; all affected what could be
+concluded from them.
+
+**1. The turn cap was a live confound.** At 40 it bound on 2/8 Arm 0 trajectories and
+4/8 Arm 1 trajectories — three Arm 1 instances stopped at exactly 37 commands. A cap
+that binds harder on the treatment arm than the control means the resolve-rate delta
+cannot distinguish restriction cost from turn exhaustion, which is precisely the
+confound §7 warns about. **Decision: raise to 100** and record `cap_bound` and
+`max_turns` per trajectory so the confound is visible in the data rather than inferred
+from a `stop_reason` string. §9 decision 4 (turns vs tokens) remains open in principle;
+this answers it for the scaled run only. *Acceptance: if any instance reaches 100, the
+cap is still binding and the number must go up again before the result is reportable.*
+
+**2. `turns` counted the wrong thing.** It incremented on every assistant message,
+including text-only ones, so it reported 72 turns against a cap of 40 — a cost metric
+not comparable to the cap it was measured against. Now counts tool-use round trips,
+the unit `max_turns` uses; assistant messages are kept separately as
+`assistant_messages`.
+
+**3. Denial attribution was wrong.** `escape_targets` credited every command in a
+denied record, so `cd /repo && python - <<EOF` counted against `cd`. This metric is
+meant to produce an empirically grounded v2 primitive set — "what agents actually reach
+for" — so a wrong ranking defeats its purpose. `Decision.denied_by` now names the
+single command that caused the denial. On the Arm 1 pilot traffic the correction moves
+`python` from 29 to 10, `cat` from 12 to 3, `which` from 4 to 1, and promotes `sed`
+(10) to second place — which is itself evidence for Arm 2, since the agent was reaching
+for an in-place editor it did not have.
+
+**4. Classifier version was unrecorded.** Arm 0 and Arm 1 ran days apart on different
+classifier versions and nothing captured that. Resolve rates survived it — observe mode
+never alters a command — but every flow-derived number was silently incomparable: Arm
+0's log recorded **zero** `read` verbs because of a bug fixed before Arm 1 ran, and its
+selectivity is unrecoverable without a re-run. A content hash of `classifier.py`,
+`policy.py` and `canon.py` is now stamped into run metadata and every flow record, and
+`report` refuses to compare flow metrics across differing fingerprints.
+
+**Also added: resume.** `solve` skips instances already present in `trajectories.json`
+that ran at least one command, so an interrupted run continues rather than restarting.
+Harness-error records are retried rather than cemented.
+
+**Consequence.** The pilot's Arm 0 flow log is retired for comparison purposes. Both
+arms must be re-run at n=8 under the raised cap and a single classifier fingerprint
+before scaling, and Arm 2 — which has never been executed once — needs a smoke test
+before it enters any design.

@@ -1,0 +1,45 @@
+{
+    "total_instances": 8,
+    "submitted_instances": 8,
+    "completed_instances": 7,
+    "resolved_instances": 5,
+    "unresolved_instances": 2,
+    "empty_patch_instances": 1,
+    "error_instances": 0,
+    "completed_ids": [
+        "matplotlib__matplotlib-26020",
+        "mwaskom__seaborn-3407",
+        "psf__requests-2317",
+        "pylint-dev__pylint-7228",
+        "pytest-dev__pytest-7373",
+        "scikit-learn__scikit-learn-13779",
+        "sphinx-doc__sphinx-8627"
+    ],
+    "incomplete_ids": [],
+    "empty_patch_ids": [
+        "pallets__flask-4045"
+    ],
+    "submitted_ids": [
+        "matplotlib__matplotlib-26020",
+        "mwaskom__seaborn-3407",
+        "pallets__flask-4045",
+        "psf__requests-2317",
+        "pylint-dev__pylint-7228",
+        "pytest-dev__pytest-7373",
+        "scikit-learn__scikit-learn-13779",
+        "sphinx-doc__sphinx-8627"
+    ],
+    "resolved_ids": [
+        "matplotlib__matplotlib-26020",
+        "mwaskom__seaborn-3407",
+        "psf__requests-2317",
+        "pytest-dev__pytest-7373",
+        "scikit-learn__scikit-learn-13779"
+    ],
+    "unresolved_ids": [
+        "pylint-dev__pylint-7228",
+        "sphinx-doc__sphinx-8627"
+    ],
+    "error_ids": [],
+    "schema_version": 2
+}

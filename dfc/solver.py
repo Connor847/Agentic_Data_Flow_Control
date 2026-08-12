@@ -30,6 +30,14 @@ from .policy import ARMS, Arm, DENY_TOOLS
 
 MODEL = os.environ.get("DFC_MODEL", "claude-sonnet-5")
 
+#: Raised from 40 on 2026-08-11. At 40 the cap bound on 2/8 Arm 0 trajectories and
+#: 4/8 Arm 1 trajectories - three Arm 1 instances stopped at exactly 37 commands. A
+#: cap that binds harder on the treatment arm than the control makes the resolve-rate
+#: delta uninterpretable: you cannot tell restriction cost from turn exhaustion, which
+#: is the confound §7 warns about. 100 should clear both arms; if nothing reaches it,
+#: the cap is no longer a confound.
+DEFAULT_MAX_TURNS = 100
+
 #: Every built-in tool that could bypass the shell, plus Bash itself (our executor is
 #: the MCP tool) and Task (a subagent call is simultaneously an external write and an
 #: untrusted read; denied in v1, it is the v2 marquee experiment - §6.5).
@@ -132,7 +140,13 @@ class Trajectory:
     instance_id: str
     arm: str
     model_patch: str = ""
+    #: Tool-use round trips - the same unit `max_turns` counts.
     turns: int = 0
+    #: Assistant messages, including text-only ones. Kept separate because it is a
+    #: different quantity and conflating them made `turns` incomparable to the cap.
+    assistant_messages: int = 0
+    max_turns: int = 0
+    cap_bound: bool = False
     duration_s: float = 0.0
     stop_reason: str = ""
     total_cost_usd: float | None = None
@@ -167,7 +181,7 @@ async def solve(
     container: InstanceContainer,
     arm: Arm,
     *,
-    max_turns: int = 40,
+    max_turns: int = DEFAULT_MAX_TURNS,
     include_hints: bool = False,
     settings_dir: str | None = None,
     command_timeout: int = 300,
@@ -212,10 +226,18 @@ async def solve(
             async for message in client.receive_response():
                 kind = type(message).__name__
                 if kind == "AssistantMessage":
-                    traj.turns += 1
+                    traj.assistant_messages += 1
+                    # `max_turns` counts agentic turns - tool-use round trips - not
+                    # assistant messages. Counting the latter reported 72 turns against
+                    # a cap of 40, which made the cost metric incomparable to the cap
+                    # it was supposed to be measured against.
                     for block in getattr(message, "content", []) or []:
                         if getattr(block, "text", None):
                             traj.final_text = block.text
+                        if type(block).__name__ == "ToolUseBlock" or getattr(
+                            block, "name", None
+                        ) == bashtool.QUALIFIED:
+                            traj.turns += 1
                 elif kind == "ResultMessage":
                     traj.stop_reason = getattr(message, "subtype", "") or "end_turn"
                     traj.total_cost_usd = getattr(message, "total_cost_usd", None)
@@ -235,7 +257,15 @@ async def solve(
     except Exception as exc:
         traj.error = (traj.error + " | " if traj.error else "") + f"patch extraction: {exc}"
 
-    if traj.turns >= max_turns and not traj.stop_reason:
+    # Explicit, so the confound is visible in the data rather than inferred from a
+    # stop_reason string. At a cap of 40 this bound 2/8 in Arm 0 and 4/8 in Arm 1 -
+    # the restricted arm needs more turns for the same work, so a cap that binds
+    # penalises it structurally (§7).
+    traj.max_turns = max_turns
+    traj.cap_bound = (
+        traj.stop_reason == "error_max_turns" or traj.turns >= max_turns
+    )
+    if traj.cap_bound and not traj.stop_reason:
         traj.stop_reason = "turn-limit"
 
     return traj

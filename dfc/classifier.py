@@ -640,7 +640,8 @@ def classify(command: str, arm: policy.Arm, *, session_id: str = "",
                         parse_error=err,
                         reason="Command could not be parsed, so its targets cannot be "
                                "extracted. Rewrite it as separate, simpler commands.",
-                        session_id=session_id, instance_id=instance_id)
+                        session_id=session_id, instance_id=instance_id,
+                        denied_by="<parse-error>")
 
     results = [(sc, _classify_one(sc, arm)) for sc in cmds]
 
@@ -682,7 +683,7 @@ def classify(command: str, arm: policy.Arm, *, session_id: str = "",
     if not arm.allow_rewrite:
         return Decision(Outcome.DENIED, command, actions, arm=arm.name,
                         reason=bad[0][1].reason, session_id=session_id,
-                        instance_id=instance_id)
+                        instance_id=instance_id, denied_by=bad[0][0].argv0)
 
     return _try_rewrite(command, cmds, results, bad, arm, session_id, instance_id)
 
@@ -700,17 +701,19 @@ def _try_rewrite(command, cmds, results, bad, arm, session_id, instance_id) -> D
             return Decision(Outcome.DENIED, command, _all_actions(results), arm=arm.name,
                             reason="command substitution cannot be canonicalized; its "
                                    "output is not statically extractable",
-                            session_id=session_id, instance_id=instance_id)
+                            session_id=session_id, instance_id=instance_id,
+                            denied_by=sc.argv0)
         folded, rule = canon.canonicalize(sc.raw)
         if rule is None or folded == sc.raw:
             return Decision(Outcome.DENIED, command, _all_actions(results), arm=arm.name,
                             reason=res.reason, session_id=session_id,
-                            instance_id=instance_id)
+                            instance_id=instance_id, denied_by=sc.argv0)
         if rule.lands_in == "python3-c":
             return Decision(Outcome.DENIED, command, _all_actions(results), arm=arm.name,
                             reason=(f"{res.reason}. The canonical rewrite for this command "
                                     "targets `python3 -c`, which is not admitted (D3)."),
-                            session_id=session_id, instance_id=instance_id)
+                            session_id=session_id, instance_id=instance_id,
+                            denied_by=sc.argv0)
         replacements.append((sc.start, sc.end, folded, rule))
 
     out = src
@@ -727,7 +730,8 @@ def _try_rewrite(command, cmds, results, bad, arm, session_id, instance_id) -> D
         return Decision(Outcome.DENIED, command, _all_actions(results), arm=arm.name,
                         reason=(f"{bad[0][1].reason}. A canonical rewrite exists but does "
                                 f"not itself pass the gate: {recheck.reason}"),
-                        session_id=session_id, instance_id=instance_id)
+                        session_id=session_id, instance_id=instance_id,
+                        denied_by=bad[0][0].argv0)
 
     actions = recheck.actions
     for a in actions:

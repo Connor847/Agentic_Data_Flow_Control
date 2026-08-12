@@ -78,9 +78,15 @@ def summarize(records: Iterable[dict]) -> dict:
                 selectivity_sum += a["selectivity"]
                 selectivity_n += 1
         if rec["outcome"] == Outcome.DENIED.value:
-            for a in rec.get("actions", []):
-                if a.get("argv0"):
-                    denied_argv0[a["argv0"]] = denied_argv0.get(a["argv0"], 0) + 1
+            # Credit only the command that caused the denial. Counting every argv0 in
+            # the record credited `cd` for `cd /repo && python - <<EOF`, which inverted
+            # the ranking this metric exists to produce.
+            culprit = rec.get("denied_by")
+            if not culprit:
+                # Pre-2026-08-11 records have no `denied_by`. Mark them rather than
+                # guessing, so a mixed corpus is visibly mixed.
+                culprit = "<unattributed>"
+            denied_argv0[culprit] = denied_argv0.get(culprit, 0) + 1
 
     subsumed = counts.get(Outcome.PASSTHROUGH.value, 0) + counts.get(Outcome.REWRITTEN.value, 0)
     gated = total - counts.get(Outcome.OBSERVED.value, 0)

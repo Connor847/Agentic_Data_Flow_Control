@@ -23,7 +23,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from . import container as container_mod
-from . import flowlog, sample, solver
+from . import flowlog, sample, solver, version
 from .policy import ARMS
 
 MODEL_NAME = "dfc-sonnet5"
@@ -252,10 +252,31 @@ def cmd_doctor(args) -> int:
 # --------------------------------------------------------------------------
 
 async def _solve_all(instances, arm, run_dir: Path, args) -> list[dict]:
+    # Resume: a long run will be interrupted - docker hiccup, rate limit, laptop
+    # sleep - and without this a single failure at instance 200 discards 200
+    # trajectories. Only trajectories that actually ran commands are kept; a
+    # harness-error record is retried rather than cemented.
     trajectories: list[dict] = []
+    done: set[str] = set()
+    existing = run_dir / "trajectories.json"
+    if existing.exists():
+        try:
+            prior = json.loads(existing.read_text())
+        except json.JSONDecodeError:
+            prior = []
+        for t in prior:
+            if t.get("tool_stats", {}).get("calls", 0) > 0:
+                trajectories.append(t)
+                done.add(t["instance_id"])
+        if done:
+            print(f"resuming  : {len(done)} trajectory(ies) already complete, "
+                  f"{len(instances) - len(done)} to go\n")
+
     dead = 0
     for i, inst in enumerate(instances, 1):
         iid = inst["instance_id"]
+        if iid in done:
+            continue
         print(f"[{i}/{len(instances)}] {iid} ... ", end="", flush=True)
         os.environ["DFC_FLOW_LOG"] = str(run_dir / "flow_log.jsonl")
         os.environ["DFC_INSTANCE_ID"] = iid
@@ -299,7 +320,8 @@ async def _solve_all(instances, arm, run_dir: Path, args) -> list[dict]:
             else:
                 dead = 0
 
-            print(f"{d['turns']} turns, {stats.get('calls', 0)} cmds, "
+            cap = " CAP" if d.get("cap_bound") else ""
+            print(f"{d['turns']} turns{cap}, {stats.get('calls', 0)} cmds, "
                   f"{stats.get('denials', 0)} denied, "
                   f"{len(d['model_patch'])}b patch"
                   + (f", ERROR {d['error'][:120]}" if d["error"] else ""))
@@ -337,15 +359,18 @@ def cmd_solve(args) -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     instances, sizes = sample.pick(args.n, args.dataset, args.split, args.seed)
-    (run_dir / "sample.json").write_text(json.dumps({
+    meta = {
         "run_id": run_id, "arm": arm.name, "model": solver.MODEL,
         "dataset": args.dataset, "split": args.split, "seed": args.seed,
         "max_turns": args.max_turns,
         "instance_ids": [i["instance_id"] for i in instances],
         "gold_patch_sizes": sizes,
-    }, indent=2))
+        **version.version_block(),
+    }
+    (run_dir / "sample.json").write_text(json.dumps(meta, indent=2))
 
     print(f"run       : {run_id}")
+    print(f"classifier: {meta['classifier_fingerprint']}")
     print(f"arm       : {arm.name} (mode={arm.mode})")
     print(f"model     : {solver.MODEL}")
     print(f"instances : {len(instances)} across "
@@ -459,6 +484,9 @@ def cmd_report(args) -> int:
             "patch_applied": bool(report and report.get("patch_successfully_applied")),
             "failure_class": classify_failure(traj, report, denial_rate, fidelity_hit),
             "turns": traj.get("turns", 0),
+            "assistant_messages": traj.get("assistant_messages", ""),
+            "cap_bound": traj.get("cap_bound", ""),
+            "max_turns": traj.get("max_turns", ""),
             "commands": len(recs),
             "dfc_observed": "|".join(f"{k}:{v}" for k, v in sorted(verbs.items())),
             "passthrough": passthrough,
@@ -485,8 +513,17 @@ def cmd_report(args) -> int:
 
     resolved = sum(r["resolved"] for r in rows)
     empty_observed = sum(1 for r in rows if not r["dfc_observed"])
+    capped = sum(1 for r in rows if r["cap_bound"] is True)
+    fps = {rec.get("cls", "") for rec in records}
     print(f"wrote {out}")
     print(f"resolved        : {resolved}/{len(rows)}")
+    print(f"hit turn cap    : {capped}/{len(rows)}"
+          + ("   ! a binding cap penalises restricted arms structurally (\u00a77)"
+             if capped else ""))
+    ok, why = version.comparable(*fps)
+    print(f"classifier      : {', '.join(sorted(f for f in fps if f)) or 'unstamped'}")
+    if not ok:
+        print(f"  ! {why}")
     print(f"empty dfc_observed cells: {empty_observed}  "
           f"(Phase 3 accepts only at 0)")
     print()
@@ -518,7 +555,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--dataset", default=sample.DATASET)
     s.add_argument("--split", default=sample.SPLIT)
     s.add_argument("--seed", type=int, default=sample.SEED)
-    s.add_argument("--max-turns", type=int, default=40)
+    s.add_argument("--max-turns", type=int, default=solver.DEFAULT_MAX_TURNS)
     s.add_argument("--command-timeout", type=int, default=300)
     s.add_argument("--platform", default=container_mod.DEFAULT_PLATFORM)
     s.add_argument("--hints", action="store_true",
