@@ -1,4 +1,13 @@
-# Phase 2 runbook — 8 instances, Arm 0, Sonnet 5
+# Runbook
+
+> **Status 2026-08-11.** The n=8 pilot is done: Arm 0 resolved 5/8, Arm 1 4/8. Both are
+> retired for comparison purposes — see D14. The sequence to run now is in
+> [§9 Re-run and scale](#9-re-run-and-scale) at the bottom; §§1–7 remain the setup
+> reference.
+
+---
+
+## Phase 2 setup — Sonnet 5 on SWE-bench Lite
 
 Run these on your Mac. Everything below assumes repo root
 `/Users/connorfeldman/Documents_Folder/College/DAP/DFC`.
@@ -181,3 +190,81 @@ matter for the acceptance check:
   If the agent seems confused about state, that is the first thing to check.
 - **n=8, one arm, one seed.** Nothing here is a measurement. It is a check that the
   machinery runs end to end.
+
+---
+
+## 9. Re-run and scale
+
+The pilot found four defects (D14). All are fixed; the consequence is that the pilot's
+flow logs are retired and both arms need re-running under the raised cap and a single
+classifier fingerprint.
+
+### 9.1 Confirm the cap stops binding — n=8, both arms
+
+```bash
+python -m dfc.run solve --n 8 --arm arm0 --max-turns 100
+python -m dfc.run solve --n 8 --arm arm1 --max-turns 100
+```
+
+Watch for `CAP` in the per-instance line. **Acceptance: no instance reaches 100 in
+either arm.** If any does, raise the cap again before drawing any conclusion — a
+binding cap penalises the restricted arm structurally, since it needs more turns for
+the same work (pilot: identical 612-byte patch, 7 commands in Arm 0 vs 19 in Arm 1).
+
+Then evaluate and report both, and check the header lines:
+
+```bash
+python -m dfc.run evaluate --run-id <arm0-id> && python -m dfc.run report --run-id <arm0-id>
+python -m dfc.run evaluate --run-id <arm1-id> && python -m dfc.run report --run-id <arm1-id>
+```
+
+`report` now prints how many instances hit the cap and which classifier fingerprint
+produced the log. If the two runs show different fingerprints, their flow metrics are
+not comparable and it will say so.
+
+### 9.2 Smoke-test Arm 2 — it has never run
+
+Arm 2 has an in-place editor, its own prompt block, and a `sed_admissible` parser that
+has only ever seen unit tests. The pilot gives a specific reason to expect it matters:
+corrected denial attribution puts `sed` second behind `python`, meaning the agent was
+already reaching for an in-place editor it did not have.
+
+```bash
+python -m dfc.run solve --n 8 --arm arm2 --max-turns 100
+```
+
+Check the flow log for `sed -i` commands that passed rather than being denied. If Arm 2
+never uses `sed -i`, the Arm 1 → Arm 2 delta measures nothing — which is what happened
+in the pilot, where the agent used `sed -i` once in 177 commands.
+
+### 9.3 Scale
+
+Only after 9.1 and 9.2 pass:
+
+```bash
+for seed in 20260811 20260812 20260813; do
+  for arm in arm0 arm1 arm2; do
+    python -m dfc.run solve --n 30 --arm $arm --seed $seed --max-turns 100 \
+      --run-id dfc-$arm-s$seed
+  done
+done
+```
+
+Roughly 270 trajectories. Notes:
+
+- **Resume works.** If a run dies, re-issue the identical command with the same
+  `--run-id`; completed trajectories are skipped. Only trajectories that ran at least
+  one command count as complete, so harness errors are retried.
+- **Check your Agent SDK credit first.** The pilot averaged about $0.73 estimated per
+  Arm 1 instance, so 270 trajectories is very roughly $190 at list rates. That is an
+  estimate, not a bill, but the monthly Agent SDK credit is finite and overflow goes to
+  usage credits. Look at `/usage` before starting.
+- **Same seed across arms.** The comparison is paired; McNemar's test depends on it.
+
+### 9.4 What makes this reportable
+
+- Arm 0 resolve rate in a plausible range, nowhere near zero
+- No instance hitting the turn cap in any arm
+- One classifier fingerprint across every run being compared
+- `dfc_observed` non-empty in every row
+- Denial attribution naming real culprits, not `cd`
