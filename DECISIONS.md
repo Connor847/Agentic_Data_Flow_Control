@@ -340,3 +340,47 @@ Harness-error records are retried rather than cemented.
 arms must be re-run at n=8 under the raised cap and a single classifier fingerprint
 before scaling, and Arm 2 — which has never been executed once — needs a smoke test
 before it enters any design.
+
+---
+
+## D15 — Findings from the raised-cap re-run (2026-08-11)
+
+Both gates passed: no instance reached the 100-turn cap (max 35 in Arm 0, 57 in Arm 1)
+and both runs carry one classifier fingerprint, `466769bd16f7`.
+
+**1. The cap was hiding the cost.** Under the binding 40-turn cap the restricted arm
+looked 22% more expensive in turns. Uncapped it is **+79% turns, +91% commands, +141%
+estimated cost**. Truncation was suppressing the very quantity being measured. Any cost
+number taken from a run where the cap binds is a lower bound, not an estimate.
+
+**2. Run-to-run variance is larger than the treatment effect.** Arm 0 was run twice on
+the same seed and the same eight instances, resolving 5/8 both times — but only **three
+of the five overlap**. `flask` and `pylint` gained, which the cap explains (both were
+cap-bound at 40). `requests` and `seaborn` were lost, and neither was cap-bound in
+either run, so that is model stochasticity alone.
+
+This is decisive for the design. The arm-to-arm difference is one instance; the
+same-arm run-to-run difference is two. **At n=8 the noise exceeds the signal**, and no
+amount of care in a single pair of runs fixes it. §7's k≥3 seeds is not a robustness
+nicety, it is the minimum for the question to be answerable — and note the variance
+observed here is *within* a seed, so seeds must be replicated, not merely varied.
+
+**3. `sed` is the second most-denied command** (11 denials, behind `python` at 12).
+The agent repeatedly reaches for an in-place editor Arm 1 does not grant. Arm 2 exists
+precisely to price that, and this is the first direct evidence the delta is real rather
+than notional.
+
+**4. `diff` (6) and `mkdir` (3) are newly visible** now that attribution is correct.
+Neither is on the infrastructure allowlist and neither carries a canonicalization rule.
+They are candidates for D6's allowlist rather than the primitive set, on the same
+argument as `git log` and `timeout`.
+
+**5. Two Arm 1 failures are labelled `rewrite-infidelity`.** Treat this as a triage
+hint, not a conclusion: only 7 of 263 records carried `fidelity_risk`, so the label
+means "a lossy rewrite was present in a failing trajectory", not "the lossy rewrite
+caused the failure". Confirming or dismissing it requires reading those seven records.
+This is exactly the check D4 was designed to make possible.
+
+**Consequence for the scaled run.** n=30 with k=3 seeds is the floor, and the seeds
+must be genuinely replicated rather than one run each. Reporting a resolve-rate delta
+from anything smaller would be reporting noise.
