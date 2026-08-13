@@ -98,21 +98,26 @@ def test_cat_multifile_is_flagged_lossy():
     assert d.as_record()["fidelity_risk"] is True
 
 
-@pytest.mark.parametrize("cmd,expected", [
-    ('find /testbed -iname "*voting*"', "ls -R /testbed"),   # was denied
-    ("find src -name '*.py'", "ls -R src"),                  # was denied
-    ("find src -type f", "ls -R src"),                       # already worked
-    ("find . -maxdepth 2 -type d", "ls -R ."),               # was denied
+@pytest.mark.parametrize("cmd", [
+    'find /testbed -iname "*voting*"',
+    "find src -name '*.py'",
+    "find src -type f",
+    "find . -maxdepth 2 -type d",
+    "find / -maxdepth 6 -iname regex -type d",
 ])
-def test_find_widening(cmd, expected):
+def test_find_is_denied_not_mistranslated(cmd):
+    """D16: the rewrite kept only the directory and dropped every predicate, so
+    `find / -maxdepth 6 -iname regex` became `ls -R /` - an unbounded listing of the
+    whole filesystem in place of a bounded, filtered search. An honest denial is
+    strictly better than a silent wrong answer."""
     out, rule = canon.canonicalize(cmd)
-    assert out == expected
-    assert rule.name == "find_enumerate"
+    assert out == cmd, "find must not be rewritten"
+    assert rule is not None and rule.name == "find_enumerate"
+    assert classify(cmd, ARM1).outcome is Outcome.DENIED
 
 
-def test_find_widening_is_flagged_lossy():
-    """`ls -R` returns a superset: the name filter is dropped in the rewrite."""
-    assert canon.BY_NAME["find_enumerate"].fidelity_risk is True
+def test_find_denial_names_find():
+    assert classify("find . -name '*.py'", ARM1).denied_by == "find"
 
 
 @pytest.mark.parametrize("cmd", [

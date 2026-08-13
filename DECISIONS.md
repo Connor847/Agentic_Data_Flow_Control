@@ -384,3 +384,62 @@ This is exactly the check D4 was designed to make possible.
 **Consequence for the scaled run.** n=30 with k=3 seeds is the floor, and the seeds
 must be genuinely replicated rather than one run each. Reporting a resolve-rate delta
 from anything smaller would be reporting noise.
+
+---
+
+## D16 — `find` rewriting withdrawn; a bad rewrite is worse than a denial (2026-08-11)
+
+The n=30 run gave Arm 0 20/30 and Arm 1 15/30, but the delta was contaminated.
+
+**What went wrong.** D13 widened `find_enumerate` to match `-iname`, `-name` and
+`-maxdepth`. The rewrite kept only the directory operand and dropped every predicate,
+so
+
+    find / -maxdepth 6 -iname "regex" -type d      became      ls -R /
+
+a bounded, filtered search replaced by an unbounded recursive listing of the entire
+container filesystem. D13 described this as "returns a superset", which understated it
+to the point of being wrong: the agent received an enormous listing that answered a
+question it had not asked. This fired on 27 of 30 `find` rewrites, touched 13 of 30
+instances, and 5 of the 7 instances Arm 1 lost were among them.
+
+**Decision.** `find` proposes no rewrite. The rule remains for labelling and coverage
+mining; `find` is denied. It was never in the §2 primitive set, and `ls` cannot express
+find's predicates — dropping them silently returns the wrong path set.
+
+**The general principle, which is the real lesson.** Before D13, `find -iname` was
+denied: the agent saw an error and adapted, and the denial was counted honestly as an
+escape attempt. After D13, the agent silently received a wrong answer. **A rewrite that
+loses information is strictly worse than a denial**, because a denial is visible to the
+agent *and* to us, while silent corruption is visible to neither. Under D2's
+silent-rewrite design this is the principal risk, and every future rule must be judged
+against it: if a faithful rewrite does not exist, deny.
+
+**Instrumentation added.** `dfc/audit.py` and `python -m dfc.run audit` compare each
+command against what was executed and flag structural divergence — dropped scope flags,
+dropped operands, scope escalation, changed redirect shape, multi-file `grep` framing.
+On the n=30 Arm 1 log it reports 72 high-severity findings, every one traceable to
+`find`. Replaying the same 1,366 commands through the fixed classifier gives **zero**.
+Coverage moves 85.9% → 83.7%, which is the honest number: the missing 2.2 points were
+commands we were mistranslating rather than handling.
+
+**Two instrumentation defects fixed alongside.**
+
+*Fidelity was flagged per rule, not per match.* `cat f` (faithful) and `cat a b`
+(lossy — `grep` prefixes each line with its filename) were flagged identically, so
+`fidelity_risk` appeared in 53% of resolved and 67% of failed trajectories and
+discriminated almost nothing. `Rule.lossy_when` now decides per match.
+
+*Rule attribution was fictional.* `_try_rewrite` stamped the first matched rule onto
+every unlabelled action, so per-rule counts drawn from `action.rule` bore no relation to
+the commands they sat on. Applied rules are now recorded on the `Decision` as
+`rules_applied`; per-action attribution happens only when a single rule fired.
+
+**Consequence.** The n=30 Arm 1 resolve rate is retired. Cost figures (+63% turns, +91%
+dollars) stand — they are unaffected by output corruption. Arm 1 must be re-run before
+its resolve rate means anything.
+
+**Also worth recording:** the audit's first run reported 47 false `redirect-shape-changed`
+findings because the check used a regex and read `>=` and `<=` inside
+`awk 'NR>=25&&NR<=60'` as redirections — the same mistake §10 warns about for the
+classifier, repeated in the tool built to catch it. It now goes through the parser.

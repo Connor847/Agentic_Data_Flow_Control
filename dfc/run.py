@@ -23,7 +23,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from . import container as container_mod
-from . import flowlog, sample, solver, version
+from . import audit, flowlog, sample, solver, version
 from .policy import ARMS
 
 MODEL_NAME = "dfc-sonnet5"
@@ -539,6 +539,47 @@ def cmd_report(args) -> int:
 
 # --------------------------------------------------------------------------
 
+def cmd_audit(args) -> int:
+    """Surface rewrites that quietly changed what the agent asked for.
+
+    The `find` defect (D16) sat in the flow log for a whole 30-instance run before
+    anyone noticed. This is the check that would have caught it on the first trajectory.
+    """
+    run_dir = RUNS_DIR / args.run_id
+    log = run_dir / "flow_log.jsonl"
+    if not log.exists():
+        print(f"no flow log at {log}", file=sys.stderr)
+        return 1
+    records = list(flowlog.read(log))
+    findings, kinds = audit.audit_records(records)
+    rewritten = sum(1 for r in records if r.get("outcome") == "rewritten")
+
+    print(f"{len(records)} records, {rewritten} rewritten, {len(findings)} findings\n")
+    if not findings:
+        print("no structural divergence found between requested and executed commands")
+        return 0
+
+    high = [f for f in findings if f.severity == "high"]
+    print(f"{'kind':26s} {'count':>6s}  severity")
+    for k, v in kinds.most_common():
+        sev = next(f.severity for f in findings if f.kind == k)
+        print(f"  {k:24s} {v:6d}  {sev}")
+    print(f"\nhigh severity: {len(high)} (these likely returned the wrong answer)\n")
+
+    groups = audit.group_by_shape(findings if not args.high_only else high)
+    for name, fs in list(groups.items())[: args.groups]:
+        if args.kind and not name.startswith(args.kind):
+            continue
+        inst = {f.instance_id for f in fs if f.instance_id}
+        print(f"--- {name}  ({len(fs)} occurrences, {len(inst)} instances) ---")
+        print(f"    {fs[0].detail}")
+        for f in fs[: args.examples]:
+            print(f"    IN : {f.command[:110]}")
+            print(f"    OUT: {f.executed[:110]}")
+        print()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="dfc.run", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -576,6 +617,14 @@ def main(argv: list[str] | None = None) -> int:
     r = sub.add_parser("report", help="join results into dfc_report.csv")
     r.add_argument("--run-id", required=True)
     r.set_defaults(func=cmd_report)
+
+    a = sub.add_parser("audit", help="find rewrites that changed what was asked for")
+    a.add_argument("--run-id", required=True)
+    a.add_argument("--kind", default="", help="filter to one finding kind")
+    a.add_argument("--high-only", action="store_true")
+    a.add_argument("--groups", type=int, default=12)
+    a.add_argument("--examples", type=int, default=2)
+    a.set_defaults(func=cmd_audit)
 
     args = p.parse_args(argv)
     return args.func(args)

@@ -38,10 +38,23 @@ class Rule:
     status: str
     notes: str
     target_bucket: str = ""    # bucket the *rewritten* form lands in; "" => same as bucket
+    #: D16. Some rules are faithful for one input shape and lossy for another:
+    #: `cat f` -> `grep "" f` is byte-faithful, but `cat a b` -> `grep "" a b` prefixes
+    #: every line with its filename. Flagging the whole rule made `fidelity_risk` fire
+    #: on 3.7% of records while appearing in 53% of resolved and 67% of failed
+    #: trajectories - nearly useless as a discriminator. When set, this predicate
+    #: decides per match instead.
+    lossy_when: Callable | None = None
 
     @property
     def fidelity_risk(self) -> bool:
-        """D4: Partial and Limitation rewrites are not output-equivalent."""
+        """Worst-case risk for this rule, ignoring the specific match."""
+        return self.status in LOSSY_STATUSES or self.lossy_when is not None
+
+    def fidelity_for(self, m: "re.Match | None") -> bool:
+        """D4, per match. Falls back to the rule's status when no predicate is set."""
+        if self.lossy_when is not None and m is not None:
+            return bool(self.lossy_when(m))
         return self.status in LOSSY_STATUSES
 
     @property
@@ -178,14 +191,16 @@ RULES: list[Rule] = [
     # WIDENED 2026-08-11: the original regex required exactly one operand, so
     # `cat a.py b.py` and `cat dir/*.rst` fell through to a denial. `grep ""` accepts
     # multiple files and globs, and row 1 plainly intends to cover reading files.
-    # Note the output differs for multiple files: grep prefixes each line with the
-    # filename, so this is Partial rather than Verified in the multi-file case.
+    # D16: the multi-operand case is the only lossy one - grep prefixes each line with
+    # its filename - so the flag is decided per match rather than for the rule.
     Rule("cat_read", 1, "grep", "READ", "MED", True,
          _rx(r"^cat\s+(?P<f>[^|<>]+?)\s*$"),
-         lambda m: 'grep "" %s' % m.group("f").strip(), "Partial",
+         lambda m: 'grep "" %s' % m.group("f").strip(), "Verified",
          "Faithful for one file; grep adds a trailing newline if the source lacks one. "
-         "For multiple files grep prefixes each line with the filename, so content is "
-         "preserved but framing differs. grep . is NOT equivalent (drops blanks)."),
+         "For several files grep prefixes each line with the filename, so content is "
+         "preserved but framing differs. grep . is NOT equivalent (drops blanks).",
+         lossy_when=lambda m: len(m.group("f").split()) > 1
+                              or any(g in m.group("f") for g in "*?[")),
 
     # ---- WRITE: > / tee (and in-place sed -i) -----------------------------
     Rule("echo_append", 18, "tee", "WRITE", "MED", True,
@@ -222,18 +237,30 @@ RULES: list[Rule] = [
          "tee writes file(s) AND stdout; policy must catch BOTH sinks."),
 
     # ---- METADATA: ls (names/sizes/perms only) ----------------------------
-    # WIDENED 2026-08-11: the original regex required `-type f`, so the very common
-    # `find DIR -iname "*pat*"` and `find DIR -name ...` fell through to a denial.
-    # Row 10 intends to cover enumeration; the name filter is a predicate over the same
-    # path set, not a different kind of access. Filtering is lost in the rewrite, hence
-    # Partial: `ls -R` returns a superset of what the name filter would have matched.
+    # REWRITE WITHDRAWN 2026-08-11 (D16). The widening earlier the same day was a
+    # mistake and an instructive one.
+    #
+    # `find` predicates are not decoration, they are the query. The rewrite kept only
+    # the directory operand and dropped everything else, so
+    #     find / -maxdepth 6 -iname "regex" -type d
+    # became
+    #     ls -R /
+    # - an unbounded recursive listing of the whole container filesystem in place of a
+    # bounded, filtered search. Documenting that as "returns a superset" badly
+    # understated it. In the n=30 Arm 1 run this fired on 27 of 30 `find` rewrites and
+    # touched 13 of 30 instances, including 5 of the 7 that Arm 1 lost.
+    #
+    # Before the widening, `find -iname` was denied and the agent adapted. After it,
+    # the agent silently received the wrong answer. **A bad rewrite is worse than an
+    # honest denial**, because denial is visible to the agent and to us while silent
+    # corruption is visible to neither. `find` was never in the §2 primitive set; the
+    # rule stays for labelling and coverage mining, but proposes no rewrite.
     Rule("find_enumerate", 10, "ls", "METADATA", "LOW", True,
-         _rx(r"^find\s+(?P<d>\S+)(?=\s+-(?:type|i?name|maxdepth|mindepth|path)\b)"
-             r"(?![^|;]*\s-(?:exec|execdir|delete|ok|fprint)\b)(?P<rest>[^|;]*)"),
-         lambda m: "ls -R %s" % m.group("d"), "Partial",
-         "Same path set, but the name/type filter is dropped: ls -R returns a superset. "
-         "./ prefix and ordering also differ. -exec/-delete are matched earlier and "
-         "handled as escapes."),
+         _rx(r"^find\b(?![^|;]*\s-(?:exec|execdir|delete|ok|fprint)\b)"),
+         None, "Limitation",
+         "No admissible rewrite: `ls` cannot express find's predicates, and dropping "
+         "them silently returns the wrong path set. Denied rather than mistranslated. "
+         "-exec/-delete are matched earlier and handled as escapes."),
     Rule("stat_size", 11, "ls", "METADATA", "LOW", True,
          _rx(r"^stat\s+-c\s+'?%s'?\s+(?P<f>\S+)"),
          lambda m: "ls -l %s" % m.group("f"), "Partial",
@@ -342,12 +369,23 @@ def canonicalize(cmd: str) -> tuple[str, Rule | None]:
     is already canonical (`rewrite is None`). Admissibility of the *result* is not
     checked here - that is `dfc/policy.py`'s job (D1).
     """
+    out, rule, _m = canonicalize_match(cmd)
+    return out, rule
+
+
+def canonicalize_match(cmd: str):
+    """As `canonicalize`, but also returns the regex match.
+
+    The match is what `Rule.fidelity_for` needs to decide whether *this particular*
+    rewrite is lossy, rather than whether the rule ever can be (D16).
+    """
     cmd = cmd.strip()
     rule = match(cmd)
     if rule is None:
-        return cmd, None
+        return cmd, None, None
+    m = rule.matches(cmd)
     out = rule.apply(cmd)
-    return (out if out is not None else cmd), rule
+    return (out if out is not None else cmd), rule, m
 
 
 def bucket_histogram() -> dict[str, int]:
@@ -355,6 +393,6 @@ def bucket_histogram() -> dict[str, int]:
 
 
 __all__ = [
-    "Rule", "RULES", "BY_NAME", "match", "canonicalize",
+    "Rule", "RULES", "BY_NAME", "match", "canonicalize", "canonicalize_match",
     "bucket_histogram", "LOSSY_STATUSES",
 ]

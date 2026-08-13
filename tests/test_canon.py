@@ -86,7 +86,6 @@ def test_order_is_load_bearing():
     ("wget https://x/y", "curl -O https://x/y"),
     ("wget -O out https://x/y", "curl -o out https://x/y"),
     ("cp a b", "tee b < a >/dev/null"),
-    ("find src -type f", "ls -R src"),
     ("tree src", "ls -R src"),
     ("test -f foo.py", "ls foo.py"),
 ])

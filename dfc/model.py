@@ -249,6 +249,12 @@ class Decision:
     #: `python`, and crediting `cd` too corrupts the "what do agents reach for" metric
     #: that is meant to drive a v2 primitive set (§7).
     denied_by: str = ""
+    #: Canonicalization rules that fired, in application order. Authoritative, unlike
+    #: per-action `rule` labels, which cannot be attributed honestly when several rules
+    #: rewrote one command line (D16).
+    rules_applied: list[str] = field(default_factory=list)
+    #: D4/D16: whether *this* rewrite is lossy, decided per match rather than per rule.
+    fidelity_risk: bool = False
     ts: float = field(default_factory=time.time)
     id: str = field(default_factory=lambda: f"act-{uuid.uuid4().hex[:8]}")
     session_id: str = ""
@@ -298,8 +304,10 @@ class Decision:
             "actions": [a.as_dict() for a in self.actions],
             "derived_label": self.derived_label().as_dict(),
             "trifecta": self.trifecta(),
-            "fidelity_risk": any(a.fidelity_risk for a in self.actions),
+            "fidelity_risk": self.fidelity_risk or any(a.fidelity_risk for a in self.actions),
         }
+        if self.rules_applied:
+            rec["rules_applied"] = self.rules_applied
         if self.updated_command is not None:
             rec["updated_command"] = self.updated_command
         if self.reason:

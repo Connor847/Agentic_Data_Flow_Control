@@ -703,7 +703,7 @@ def _try_rewrite(command, cmds, results, bad, arm, session_id, instance_id) -> D
                                    "output is not statically extractable",
                             session_id=session_id, instance_id=instance_id,
                             denied_by=sc.argv0)
-        folded, rule = canon.canonicalize(sc.raw)
+        folded, rule, m = canon.canonicalize_match(sc.raw)
         if rule is None or folded == sc.raw:
             return Decision(Outcome.DENIED, command, _all_actions(results), arm=arm.name,
                             reason=res.reason, session_id=session_id,
@@ -714,10 +714,10 @@ def _try_rewrite(command, cmds, results, bad, arm, session_id, instance_id) -> D
                                     "targets `python3 -c`, which is not admitted (D3)."),
                             session_id=session_id, instance_id=instance_id,
                             denied_by=sc.argv0)
-        replacements.append((sc.start, sc.end, folded, rule))
+        replacements.append((sc.start, sc.end, folded, rule, m))
 
     out = src
-    for start, end, new, _rule in sorted(replacements, key=lambda r: -r[0]):
+    for start, end, new, _rule, _m in sorted(replacements, key=lambda r: -r[0]):
         out = out[:start] + new + out[end:]
 
     # Re-verify: the rewritten form must itself pass the gate.
@@ -734,17 +734,29 @@ def _try_rewrite(command, cmds, results, bad, arm, session_id, instance_id) -> D
                         denied_by=bad[0][0].argv0)
 
     actions = recheck.actions
-    for a in actions:
-        for _s, _e, _n, rule in replacements:
+
+    # D16: rule attribution used to stamp the *first* replacement's rule onto every
+    # unlabelled action, which made per-rule counts drawn from `action.rule`
+    # meaningless - the label bore no relation to the command it sat on. Actions come
+    # from re-classifying the rewritten string, so their spans do not correspond to
+    # spans in the original and there is no honest per-action mapping when several
+    # rules fired. Record the applied rules on the Decision, and attribute per action
+    # only in the unambiguous single-rule case.
+    applied = [(rule, m) for _s, _e, _n, rule, m in replacements]
+    if len(applied) == 1:
+        rule, m = applied[0]
+        lossy = rule.fidelity_for(m)
+        for a in actions:
             if a.rule is None:
                 a.rule, a.csv_row, a.status = rule.name, rule.csv_row, rule.status
-                a.police, a.fidelity_risk, a.notes = rule.police, rule.fidelity_risk, rule.notes
-                break
+                a.police, a.fidelity_risk, a.notes = rule.police, lossy, rule.notes
 
     return Decision(Outcome.REWRITTEN, command, actions, updated_command=out,
                     arm=arm.name,
+                    rules_applied=[r.name for r, _ in applied],
+                    fidelity_risk=any(r.fidelity_for(m) for r, m in applied),
                     reason="folded onto the primitive set: "
-                           + ", ".join(r[3].name for r in replacements),
+                           + ", ".join(r.name for r, _ in applied),
                     session_id=session_id, instance_id=instance_id)
 
 
