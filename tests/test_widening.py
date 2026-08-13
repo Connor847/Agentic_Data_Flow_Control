@@ -223,3 +223,54 @@ def test_arms_differ_only_by_the_appended_block():
     from dfc.solver import SYSTEM_PROMPT
     for arm in (ARM1, ARM2):
         assert system_prompt_for(arm).startswith(SYSTEM_PROMPT)
+
+
+# --------------------------------------------------------------------------
+# D17 - sed a/i/c take a text block, not more sed commands
+# --------------------------------------------------------------------------
+
+MULTILINE_APPEND = "sed -i '456a\\\n    def foo(self):\n        return 1' f.py"
+
+
+def test_multiline_append_is_admissible():
+    """The text block was being parsed as commands: `def foo(self):` read as an
+    unaddressed `d`, `return 1` as an `r`. It denied 19 of 91 sed -i calls in the
+    Arm 2 run - the single capability Arm 2 exists to provide."""
+    assert classify(MULTILINE_APPEND, ARM2).outcome is Outcome.PASSTHROUGH
+
+
+def test_multiline_insert_is_admissible():
+    d = classify("sed -i '5i\\\nimport os\nimport sys' f.py", ARM2)
+    assert d.outcome is Outcome.PASSTHROUGH
+
+
+def test_append_text_containing_sed_syntax_is_text():
+    """`sed '1a foo; w /tmp/x'` appends the whole string as text - GNU sed does not
+    read `w` as a command there, and neither may we."""
+    d = classify("sed -i '5a\\\ntext with ; and w /tmp/x inside' f.py", ARM2)
+    assert d.outcome is Outcome.PASSTHROUGH
+
+
+def test_insert_still_requires_an_address():
+    d = classify("sed -i 'a\\\nsome text' f.py", ARM2)
+    assert d.outcome is Outcome.DENIED
+    assert "address" in d.reason
+
+
+@pytest.mark.parametrize("script,needle", [
+    ("w /tmp/out", "w"),
+    ("r /etc/passwd", "r"),
+    ("1e date", "e"),
+    ("11,15c\\\nnew", "c"),
+])
+def test_escape_hatches_still_denied_after_the_fix(script, needle):
+    d = classify(f"sed -i '{script}' f.py", ARM2)
+    assert d.outcome is Outcome.DENIED
+
+
+def test_unaddressed_delete_still_denied():
+    assert classify("sed -i 'd' f.py", ARM2).outcome is Outcome.DENIED
+
+
+def test_arm1_still_refuses_sed_inplace():
+    assert classify(MULTILINE_APPEND, ARM1).outcome is Outcome.DENIED

@@ -443,3 +443,48 @@ its resolve rate means anything.
 findings because the check used a regex and read `>=` and `<=` inside
 `awk 'NR>=25&&NR<=60'` as redirections — the same mistake §10 warns about for the
 classifier, repeated in the tool built to catch it. It now goes through the parser.
+
+---
+
+## D17 — Arm 2 first run: sed `a`/`i`/`c` text blocks were parsed as commands (2026-08-13)
+
+Arm 2 (n=8, cap 100) resolved **5/8** — matching Arm 0 and one ahead of Arm 1 — with a
+clean audit: zero high-severity findings, confirming the D16 fix held. But the scoped
+`sed` parser had a defect that suppressed the arm's whole reason for existing.
+
+**The defect.** `a`, `i` and `c` take a *text block*, and in the one-liner form that
+block runs to the end of the script, newlines included. The validator kept parsing it as
+sed syntax, so an appended
+
+    def foo(self):
+        return 1
+
+was read as command `d` (unaddressed delete → denied) and command `r` (read an unlisted
+file → denied). Reported denial reasons included `\`, `X`, `"`, `-` and `I` — all first
+characters of *inserted source code*. This denied **19 of 91** `sed -i` calls, and
+multi-line insertion is precisely the capability Arm 2 exists to provide.
+
+**Fix.** On reaching an `a`/`i`/`c` command, validate the command and its address, then
+stop: everything after is text. This matches GNU sed, which treats `sed '1a foo; 2d'` as
+appending the literal text `foo; 2d`. The escape hatches are unaffected because sed
+itself would not execute them there either — a `w /tmp/x` inside appended text is text.
+
+**Effect, replaying the same 324 commands:** coverage 81.5% → 86.1%, denials 60 → 45,
+`sed -i` denials 19 → 4. The four survivors are one genuine `c`, one stream `sed`, and
+two malformed scripts.
+
+**Open sub-decision: admit `c`?** `c` (change) is `d` followed by `i`, address-scoped,
+with no escape surface the other three lack. The plan's subset is `s, d, i, a`, so it is
+currently denied by name. It is the strongest remaining candidate for admission and the
+decision belongs in the paper either way.
+
+**Comparison caveat, caught by the fingerprint stamp.** Arm 2 ran on classifier
+`793103d05d84`; the Arm 0 and Arm 1 n=8 runs used `466769bd16f7`. Arm 2 therefore
+carries the D16 `find` fix and the earlier arms do not, so **Arm 1 vs Arm 2 is not a
+clean comparison** — Arm 2 is advantaged. Arm 0's resolve rate remains comparable
+(observe mode never alters a command), but Arm 1 and Arm 2 must be re-run on one
+fingerprint before their delta means anything.
+
+**Also worth noting:** Arm 2 used *more* turns than Arm 1 (347 vs 284), not fewer. The
+hypothesis was that an in-place editor removes the whole-file-rewrite tax. With 19 false
+denials forcing retries, this run cannot test that; the re-run can.

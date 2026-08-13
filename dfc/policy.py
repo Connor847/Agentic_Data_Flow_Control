@@ -204,6 +204,9 @@ _SED_ADDRESS = re.compile(
 )
 
 _SED_ALLOWED_COMMANDS = frozenset({"s", "d", "i", "a"})
+#: Commands whose argument is a block of literal text rather than more sed syntax.
+#: `c` is listed so it is rejected by name rather than by mis-parsing its text.
+_SED_TEXT_COMMANDS = frozenset({"a", "i", "c"})
 #: The commands that make sed fail the admission criterion outright.
 _SED_FORBIDDEN_COMMANDS = frozenset({"r", "R", "w", "W", "e", "F", "v"})
 
@@ -263,6 +266,23 @@ def sed_admissible(script: str, argv: list[str], arm: Arm) -> tuple[bool, str]:
         if not body:
             continue
         cmd = body[0]
+
+        # D17. `a`, `i` and `c` take a *text block*, and in the one-liner form that
+        # block runs to the end of the script - newlines included. Continuing to parse
+        # it as commands reads the inserted code as sed syntax: an appended
+        #     def foo(self):
+        #         return 1
+        # was read as command `d` (unaddressed delete - denied) and command `r` (read
+        # an unlisted file - denied). That is a false denial of the single capability
+        # Arm 2 exists to provide, and it fired on 19 of 91 `sed -i` calls.
+        if cmd in _SED_TEXT_COMMANDS:
+            if cmd not in _SED_ALLOWED_COMMANDS:
+                return False, (f"sed command `{cmd}` is outside the scoped subset "
+                               f"({', '.join(sorted(_SED_ALLOWED_COMMANDS))})")
+            if not had_address:
+                return False, (f"sed `{cmd}` needs an address saying where to insert; "
+                               "an unaddressed insert applies to every line")
+            return True, ""   # everything after this point is text, not commands
         if cmd in _SED_FORBIDDEN_COMMANDS:
             return False, (
                 f"sed command `{cmd}` reads, writes or executes a target that is not "
