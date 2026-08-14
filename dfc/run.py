@@ -23,7 +23,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from . import container as container_mod
-from . import audit, census, flowlog, sample, solver, version
+from . import audit, census, flowlog, inspect_run, sample, solver, version
 from .policy import ARMS
 
 MODEL_NAME = "dfc-sonnet5"
@@ -620,6 +620,89 @@ def cmd_census(args) -> int:
     return 0
 
 
+def _print_instance(v, args) -> None:
+    bar = "=" * 78
+    print(bar)
+    print(f"{v.instance_id}   [{v.failure_class or ('resolved' if v.resolved else '?')}]")
+    print(bar)
+    print(f"turns {v.turns}{'  CAP' if v.cap_bound else ''} | stop {v.stop_reason} | "
+          f"patch {len(v.model_patch)}b | applied {v.patch_applied} | "
+          f"files {', '.join(v.dirty_paths) or 'none'}")
+    if v.error:
+        print(f"harness error: {v.error[:160]}")
+
+    print(f"\nTESTS  FAIL_TO_PASS {len(v.f2p_pass)} passed / {len(v.f2p_fail)} failed"
+          f"   PASS_TO_PASS {len(v.p2p_pass)} passed / {len(v.p2p_fail)} failed")
+    for t in v.f2p_fail[: args.tests]:
+        print(f"   still failing : {t}")
+    for t in v.p2p_fail[: args.tests]:
+        print(f"   REGRESSION    : {t}")
+
+    if v.never_ran_target_test:
+        print("\n  ! the agent never referenced the failing target test in any command")
+    if v.agent_claimed_success:
+        print("  ! the agent's closing message claims success")
+
+    print(f"\nCOMMANDS ({len(v.commands)})")
+    for i, c in enumerate(v.commands, 1):
+        rc = c["exit_code"]
+        mark = " " if rc in (0, None) else "!"
+        line = c["command"].replace("\n", " ; ")[: args.width]
+        print(f" {mark}{i:3d}. [{c['outcome'][:4]}] rc={rc if rc is not None else '-':>3} {line}")
+        if c["outcome"] == "denied" and args.verbose:
+            print(f"        denied: {c['reason'][:110]}")
+        if args.verbose and c["executed"] and c["executed"] != c["command"]:
+            print(f"        ran   : {c['executed'].replace(chr(10), ' ; ')[: args.width]}")
+
+    print("\nAGENT'S CLOSING MESSAGE")
+    print("  " + (v.final_text[: args.text].replace("\n", "\n  ") or "(none)"))
+
+    if args.patch and v.model_patch:
+        print("\nPATCH")
+        print(v.model_patch[:3000])
+    if args.test_output:
+        out = inspect_run.test_output(v.run_id, v.instance_id)
+        if out:
+            print("\nHARNESS TEST OUTPUT (tail)")
+            print(out[-args.text * 3:])
+    print()
+
+
+def cmd_inspect(args) -> int:
+    if args.failures:
+        views = inspect_run.triage(RUNS_DIR, args.run_id)
+        if not args.instance:
+            print(f"{len(views)} unresolved instance(s) in {args.run_id}, "
+                  "most diagnosable first\n")
+            print(f"  {'instance':34s} {'class':22s} {'F2P':>5s} {'P2P':>5s} flags")
+            for v in views:
+                flags = []
+                if v.agent_claimed_success:
+                    flags.append("claimed-success")
+                if v.never_ran_target_test:
+                    flags.append("never-ran-target")
+                if v.cap_bound:
+                    flags.append("cap")
+                print(f"  {v.instance_id:34s} {v.failure_class:22s} "
+                      f"{len(v.f2p_fail):5d} {len(v.p2p_fail):5d} {' '.join(flags)}")
+            print("\nread one with: python -m dfc.run inspect --run-id "
+                  f"{args.run_id} --instance <id>")
+            return 0
+        for v in views:
+            _print_instance(v, args)
+        return 0
+
+    if not args.instance:
+        print("give --instance <id> or --failures", file=sys.stderr)
+        return 1
+    v = inspect_run.load(RUNS_DIR, args.run_id, args.instance)
+    if v is None:
+        print(f"{args.instance} not found in {args.run_id}", file=sys.stderr)
+        return 1
+    _print_instance(v, args)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="dfc.run", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -671,6 +754,21 @@ def main(argv: list[str] | None = None) -> int:
     cs.add_argument("--coverage", action="store_true",
                     help="also report what the primitive set would subsume")
     cs.set_defaults(func=cmd_census)
+
+    ins = sub.add_parser("inspect", help="per-instance failure forensics")
+    ins.add_argument("--run-id", required=True)
+    ins.add_argument("--instance", default="")
+    ins.add_argument("--failures", action="store_true",
+                     help="triage every unresolved instance")
+    ins.add_argument("--verbose", action="store_true",
+                     help="show denial reasons and rewritten forms")
+    ins.add_argument("--patch", action="store_true")
+    ins.add_argument("--test-output", action="store_true",
+                     help="tail of the harness test output")
+    ins.add_argument("--tests", type=int, default=6)
+    ins.add_argument("--width", type=int, default=100)
+    ins.add_argument("--text", type=int, default=1200)
+    ins.set_defaults(func=cmd_inspect)
 
     args = p.parse_args(argv)
     return args.func(args)
