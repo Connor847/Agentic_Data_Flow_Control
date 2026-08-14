@@ -149,3 +149,72 @@ def test_no_high_severity_findings_from_current_classifier():
                      "updated_command": d.updated_command or ""})
     findings, _ = audit.audit_records(recs)
     assert [f for f in findings if f.severity == "high"] == []
+
+
+# --------------------------------------------------------------------------
+# Command census (§7)
+# --------------------------------------------------------------------------
+
+def test_census_counts_every_command_node_not_the_first_word(tmp_path):
+    """`cd /repo && grep x f | head -20` is three invocations. Counting the first
+    token would report only `cd`, which is the most frequent token in every arm."""
+    from dfc import census
+    run = tmp_path / "runs" / "r1"
+    run.mkdir(parents=True)
+    (run / "sample.json").write_text('{"arm": "arm0-baseline"}')
+    (run / "flow_log.jsonl").write_text(
+        '{"command": "cd /repo && grep x f | head -20", "outcome": "observed"}\n')
+    c = census.collect(tmp_path / "runs")["arm0"]
+    assert c.invocations == 3
+    assert set(c.counts) == {"cd", "grep", "head"}
+
+
+def test_census_counts_what_the_agent_wrote_not_what_ran(tmp_path):
+    """Counting `executed` would measure our canonicalization table instead of the
+    agent's behaviour."""
+    from dfc import census
+    run = tmp_path / "runs" / "r1"
+    run.mkdir(parents=True)
+    (run / "sample.json").write_text('{"arm": "arm1-primitives"}')
+    (run / "flow_log.jsonl").write_text(
+        '{"command": "cat f.py", "executed": "grep \\"\\" f.py", '
+        '"updated_command": "grep \\"\\" f.py", "outcome": "rewritten"}\n')
+    c = census.collect(tmp_path / "runs")["arm1"]
+    assert c.counts["cat"] == 1
+    assert "grep" not in c.counts
+
+
+def test_census_separates_arms(tmp_path):
+    from dfc import census
+    for name, arm, cmd in (("r0", "arm0-baseline", "python3 -c x"),
+                           ("r1", "arm1-primitives", "grep y f")):
+        run = tmp_path / "runs" / name
+        run.mkdir(parents=True)
+        (run / "sample.json").write_text(f'{{"arm": "{arm}"}}')
+        (run / "flow_log.jsonl").write_text(
+            '{"command": "%s", "outcome": "observed"}\n' % cmd)
+    cs = census.collect(tmp_path / "runs")
+    assert set(cs) == {"arm0", "arm1"}
+    assert cs["arm0"].counts["python3"] == 1
+    assert cs["arm1"].counts["grep"] == 1
+
+
+def test_coverage_reports_invocation_and_name_shares(tmp_path):
+    """The gap between the two *is* the Zipfian argument."""
+    from dfc import census
+    c = census.ArmCensus(arm="arm0", invocations=10)
+    c.counts.update({"grep": 8, "python": 1, "xargs": 1})
+    cov = census.coverage_of(c, {"grep"})
+    assert cov["by_invocation"] == 0.8
+    assert round(cov["by_distinct_name"], 3) == 0.333
+    assert cov["uncovered_invocations"] == 2
+
+
+def test_unparseable_lines_counted_not_silently_dropped(tmp_path):
+    from dfc import census
+    run = tmp_path / "runs" / "r1"
+    run.mkdir(parents=True)
+    (run / "sample.json").write_text('{"arm": "arm0-baseline"}')
+    (run / "flow_log.jsonl").write_text('{"command": "if [ ; then", "outcome": "observed"}\n')
+    c = census.collect(tmp_path / "runs")["arm0"]
+    assert c.unparseable == 1 and c.invocations == 0

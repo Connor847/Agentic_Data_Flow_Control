@@ -23,7 +23,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from . import container as container_mod
-from . import audit, flowlog, sample, solver, version
+from . import audit, census, flowlog, sample, solver, version
 from .policy import ARMS
 
 MODEL_NAME = "dfc-sonnet5"
@@ -580,6 +580,46 @@ def cmd_audit(args) -> int:
     return 0
 
 
+def cmd_census(args) -> int:
+    """The natural distribution of bash the agent reaches for (\u00a77)."""
+    censuses = census.collect(RUNS_DIR)
+    if not censuses:
+        print(f"no flow logs under {RUNS_DIR}", file=sys.stderr)
+        return 1
+
+    out = RUNS_DIR / "command_census.csv"
+    census.write_csv(censuses, out)
+
+    for arm in sorted(censuses):
+        c = censuses[arm]
+        natural = " (natural distribution)" if arm == "arm0" else \
+                  " (behaviour under restriction, not natural)"
+        print(f"\n=== {arm}{natural} ===")
+        print(f"{c.shell_lines} shell lines -> {c.invocations} command invocations, "
+              f"{c.distinct} distinct, {len(c.instances)} instances, "
+              f"{c.unparseable} unparseable")
+        print(f"top 10 cover {c.head_share(10):.1%} of invocations; "
+              f"top 20 cover {c.head_share(20):.1%}")
+        print()
+        print(f"  {'#':>3s}  {'command':14s} {'n':>6s}  {'share':>7s}  {'cum':>7s}")
+        for r in c.rows()[: args.top]:
+            print(f"  {r['rank']:3d}. {r['command']:14s} {r['invocations']:6d}  "
+                  f"{r['share']:6.2%}  {r['cumulative_share']:6.2%}")
+        if args.coverage:
+            from .policy import ARM1, INFRA_ALLOWLIST
+            admitted = set(ARM1.primitives) | set(INFRA_ALLOWLIST)
+            cov = census.coverage_of(c, admitted)
+            print(f"\n  primitive set + infra allowlist covers "
+                  f"{cov['by_invocation']:.1%} of invocations "
+                  f"({cov['by_distinct_name']:.1%} of distinct names)")
+            if cov["top_uncovered"]:
+                top = ", ".join(f"{u['command']}({u['invocations']})"
+                                for u in cov["top_uncovered"][:8])
+                print(f"  most frequent uncovered: {top}")
+    print(f"\nwrote {out}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="dfc.run", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -625,6 +665,12 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--groups", type=int, default=12)
     a.add_argument("--examples", type=int, default=2)
     a.set_defaults(func=cmd_audit)
+
+    cs = sub.add_parser("census", help="natural distribution of bash commands used")
+    cs.add_argument("--top", type=int, default=40)
+    cs.add_argument("--coverage", action="store_true",
+                    help="also report what the primitive set would subsume")
+    cs.set_defaults(func=cmd_census)
 
     args = p.parse_args(argv)
     return args.func(args)
