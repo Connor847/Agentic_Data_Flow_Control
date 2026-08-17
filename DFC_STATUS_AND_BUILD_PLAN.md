@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-08-10
 **Purpose:** Hand-off document. Give this to a fresh session as context before doing any work.
-**Repo root:** `/Users/connorfeldman/Documents_Folder/College/DAP/DFC`
+**Repo root:** `$DFC_ROOT`
 
 ---
 

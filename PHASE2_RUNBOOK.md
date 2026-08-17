@@ -10,7 +10,7 @@
 ## Phase 2 setup — Sonnet 5 on SWE-bench Lite
 
 Run these on your Mac. Everything below assumes repo root
-`/Users/connorfeldman/Documents_Folder/College/DAP/DFC`.
+`$DFC_ROOT`.
 
 **Configuration for this run** (chosen 2026-08-11):
 
@@ -34,7 +34,7 @@ is not wired up and is exactly the failure the last run had.
 compatibility risk. Rebuild on 3.11 before running anything.
 
 ```bash
-cd "/Users/connorfeldman/Documents_Folder/College/DAP/DFC"
+cd "$DFC_ROOT"
 
 # 3.11, per §5 housekeeping
 python3.11 -m venv dfc-env-311

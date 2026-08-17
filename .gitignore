@@ -35,3 +35,7 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# Result artefacts: published separately, not in the repo (see README)
+command_census.csv
+dfc-sonnet5.*.json

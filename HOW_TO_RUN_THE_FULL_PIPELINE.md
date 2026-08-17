@@ -147,7 +147,7 @@ their own tidy "workspace" so they don't tangle with anything else on your Mac.
 2. Go to the folder that has your notebook. Copy-paste this exactly and press
    Return:
    ```
-   cd "/Users/connorfeldman/Documents_Folder/College/DAP/DFC"
+   cd "$DFC_ROOT"
    ```
    (Nothing visible happens — that's fine. It just means "work in this folder now.")
 3. Create the tidy workspace (called a "virtual environment"). Copy-paste and Return:
@@ -298,7 +298,7 @@ saved permanently next to your notebook.
 
 - **A cell shows `command not found` or `No module named …`.**
   Your Terminal isn't in the workspace. In the Terminal, run:
-  `cd "/Users/connorfeldman/Documents_Folder/College/DAP/DFC"` then
+  `cd "$DFC_ROOT"` then
   `source dfc-env/bin/activate` (you should see `(dfc-env)`), then start JupyterLab
   again with `python3 -m jupyter lab`.
 
