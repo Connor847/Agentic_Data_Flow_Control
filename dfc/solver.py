@@ -159,6 +159,14 @@ class Trajectory:
     #: reports it here and nowhere else, and without it a broken run looks like a
     #: model failure.
     stderr_tail: list[str] = field(default_factory=list)
+    #: Claude Code's session id, so the on-disk transcript can be found later.
+    session_id: str = ""
+    #: Per-turn reasoning: thinking, prose, and the tool call it led to. Captured from
+    #: the SDK message stream, which is a supported interface - unlike the JSONL
+    #: session store, whose format the docs describe as internal and version-dependent.
+    #: Without this the only surviving reasoning is `final_text`, the last text block,
+    #: which is how a trajectory that tested the wrong thing can look like a success.
+    reasoning: list[dict] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         d = dict(self.__dict__)
@@ -185,6 +193,8 @@ async def solve(
     include_hints: bool = False,
     settings_dir: str | None = None,
     command_timeout: int = 300,
+    capture_reasoning: bool = True,
+    capture_chars: int = 8000,
 ) -> Trajectory:
     """Run one instance to completion and return the trajectory."""
     from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
@@ -227,21 +237,41 @@ async def solve(
                 kind = type(message).__name__
                 if kind == "AssistantMessage":
                     traj.assistant_messages += 1
+                    step: dict = {"n": traj.assistant_messages, "thinking": "",
+                                  "text": "", "calls": []}
                     # `max_turns` counts agentic turns - tool-use round trips - not
                     # assistant messages. Counting the latter reported 72 turns against
                     # a cap of 40, which made the cost metric incomparable to the cap
                     # it was supposed to be measured against.
                     for block in getattr(message, "content", []) or []:
-                        if getattr(block, "text", None):
+                        btype = type(block).__name__
+                        if btype in ("ThinkingBlock", "RedactedThinkingBlock"):
+                            step["thinking"] += (
+                                getattr(block, "thinking", "")
+                                or getattr(block, "text", "")
+                                or "[redacted]"
+                            )
+                        if getattr(block, "text", None) and btype != "ThinkingBlock":
                             traj.final_text = block.text
-                        if type(block).__name__ == "ToolUseBlock" or getattr(
+                            step["text"] += block.text
+                        if btype == "ToolUseBlock" or getattr(
                             block, "name", None
                         ) == bashtool.QUALIFIED:
                             traj.turns += 1
+                            step["calls"].append(
+                                str(getattr(block, "input", {}).get("command", ""))
+                                [:capture_chars]
+                            )
+                    if capture_reasoning and (step["thinking"] or step["text"]
+                                              or step["calls"]):
+                        step["thinking"] = step["thinking"][:capture_chars]
+                        step["text"] = step["text"][:capture_chars]
+                        traj.reasoning.append(step)
                 elif kind == "ResultMessage":
                     traj.stop_reason = getattr(message, "subtype", "") or "end_turn"
                     traj.total_cost_usd = getattr(message, "total_cost_usd", None)
                     traj.usage = getattr(message, "usage", {}) or {}
+                    traj.session_id = getattr(message, "session_id", "") or ""
     except Exception as exc:  # harness error, not a model failure - record as such
         traj.error = f"{type(exc).__name__}: {exc}"
         traj.stop_reason = traj.stop_reason or "harness-error"

@@ -23,7 +23,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from . import container as container_mod
-from . import audit, census, flowlog, inspect_run, sample, solver, version
+from . import audit, census, flowlog, inspect_run, sample, solver, transcript, version
 from .policy import ARMS
 
 MODEL_NAME = "dfc-sonnet5"
@@ -306,6 +306,7 @@ async def _solve_all(instances, arm, run_dir: Path, args) -> list[dict]:
                 include_hints=args.hints,
                 settings_dir=str(Path.cwd()) if args.project_settings else None,
                 command_timeout=args.command_timeout,
+                capture_reasoning=not args.no_reasoning,
             )
             d = traj.as_dict()
             stats = d.get("tool_stats", {})
@@ -654,6 +655,23 @@ def _print_instance(v, args) -> None:
         if args.verbose and c["executed"] and c["executed"] != c["command"]:
             print(f"        ran   : {c['executed'].replace(chr(10), ' ; ')[: args.width]}")
 
+    if args.reasoning and v.reasoning:
+        print(f"\nREASONING ({len(v.reasoning)} assistant turns)")
+        for st in v.reasoning:
+            print(f"  --- turn {st['n']} ---")
+            if st.get("thinking"):
+                print("   [thinking] " + st["thinking"][: args.text]
+                      .replace("\n", "\n              "))
+            if st.get("text"):
+                print("   [says]     " + st["text"][: args.text]
+                      .replace("\n", "\n              "))
+            for c in st.get("calls", []):
+                print(f"   [runs]     {c[: args.width]}")
+    elif args.reasoning:
+        print("\nREASONING: not captured for this run.")
+        print("  Recover it from Claude Code's session store:")
+        print(f"    python -m dfc.run transcript --instance {v.instance_id}")
+
     print("\nAGENT'S CLOSING MESSAGE")
     print("  " + (v.final_text[: args.text].replace("\n", "\n  ") or "(none)"))
 
@@ -703,6 +721,39 @@ def cmd_inspect(args) -> int:
     return 0
 
 
+def cmd_transcript(args) -> int:
+    """Recover the agent's reasoning from Claude Code's own session store."""
+    cwd = args.cwd or str(Path.cwd())
+    root = transcript.store_root() / "projects" / transcript.project_dir(cwd)
+    files = transcript.transcripts_for(cwd)
+
+    if args.list or not args.instance:
+        print(f"store : {root}")
+        print(f"found : {len(files)} transcript file(s)\n")
+        if not files:
+            print("Nothing here. Either the runs used a different working directory,\n"
+                  "CLAUDE_CONFIG_DIR moved the store, or the 30-day retention\n"
+                  "(cleanupPeriodDays) has already deleted them.")
+            return 1
+        import time
+        for f in files[-args.limit:]:
+            age = (time.time() - f.stat().st_mtime) / 86400
+            print(f"  {f.name}  {f.stat().st_size/1e6:6.2f} MB  {age:4.1f} days old")
+        print("\nread one with: python -m dfc.run transcript --instance <instance-id>")
+        return 0
+
+    ts = transcript.find_for_instance(args.instance, args.match, cwd)
+    if not ts:
+        print(f"no transcript matched {args.instance}", file=sys.stderr)
+        print(f"searched {len(files)} file(s) under {root}", file=sys.stderr)
+        return 1
+    for t in ts[: args.max]:
+        print(transcript.render(t, thinking=not args.no_thinking,
+                                results=args.results, width=args.width))
+        print()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="dfc.run", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -725,6 +776,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--hints", action="store_true",
                    help="include hints_text (off by default: it is not available in a "
                         "realistic setting and inflates the baseline)")
+    s.add_argument("--no-reasoning", action="store_true",
+                   help="do not capture per-turn thinking (smaller trajectories.json)")
     s.add_argument("--network-none", action="store_true",
                    help="Phase 2b: empty netns inside the container")
     s.add_argument("--project-settings", action="store_true",
@@ -763,12 +816,27 @@ def main(argv: list[str] | None = None) -> int:
     ins.add_argument("--verbose", action="store_true",
                      help="show denial reasons and rewritten forms")
     ins.add_argument("--patch", action="store_true")
+    ins.add_argument("--reasoning", action="store_true",
+                     help="per-turn thinking, if the run captured it")
     ins.add_argument("--test-output", action="store_true",
                      help="tail of the harness test output")
     ins.add_argument("--tests", type=int, default=6)
     ins.add_argument("--width", type=int, default=100)
     ins.add_argument("--text", type=int, default=1200)
     ins.set_defaults(func=cmd_inspect)
+
+    tr = sub.add_parser("transcript",
+                        help="recover agent reasoning from Claude Code session files")
+    tr.add_argument("--instance", default="")
+    tr.add_argument("--list", action="store_true")
+    tr.add_argument("--match", default="", help="extra text to match in the first prompt")
+    tr.add_argument("--cwd", default="", help="working directory the run used")
+    tr.add_argument("--results", action="store_true", help="include tool output")
+    tr.add_argument("--no-thinking", action="store_true")
+    tr.add_argument("--width", type=int, default=2000)
+    tr.add_argument("--limit", type=int, default=40)
+    tr.add_argument("--max", type=int, default=1)
+    tr.set_defaults(func=cmd_transcript)
 
     args = p.parse_args(argv)
     return args.func(args)

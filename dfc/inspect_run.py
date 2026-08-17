@@ -46,6 +46,8 @@ class InstanceView:
     model_patch: str = ""
     dirty_paths: list = field(default_factory=list)
     error: str = ""
+    reasoning: list = field(default_factory=list)
+    session_id: str = ""
 
     @property
     def agent_claimed_success(self) -> bool:
@@ -109,6 +111,8 @@ def load(runs_dir: Path, run_id: str, instance_id: str) -> InstanceView | None:
     v.model_patch = t.get("model_patch", "")
     v.dirty_paths = t.get("dirty_paths", [])
     v.error = t.get("error", "")
+    v.reasoning = t.get("reasoning", []) or []
+    v.session_id = t.get("session_id", "")
 
     rep = _eval_report(run_id, instance_id)
     if rep:
