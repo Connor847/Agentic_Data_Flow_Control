@@ -1,7 +1,17 @@
-# Virtualenvs
-dfc-env/
-.venv/
-venv/
+# Virtualenvs. The glob matters: `dfc-env/` did not match `dfc-env-311/`, and
+# 8,086 files of a Python 3.11 venv were committed before anyone noticed.
+dfc-env*/
+.venv*/
+venv*/
+env/
+*.egg-info/
+pyvenv.cfg
+
+# Secrets. Nothing here has ever held one, and it stays that way.
+.env
+.env.*
+*.token
+credentials.json
 
 # The Scale SWE-Bench Pro clone carries its own git history and submodules.
 SWE-bench_Pro-os/
