@@ -23,7 +23,7 @@ Two properties that make a `PreToolUse` deny the right enforcement point:
 
 Configuration is by environment variable so a single hook binary serves every arm:
 
-  DFC_ARM          arm0 | arm1 | arm2          (default arm1)
+  DFC_ARM          arm0 | arm1                 (default arm1)
   DFC_FLOW_LOG     path to the JSONL flow log  (default ./flow_log.jsonl)
   DFC_INSTANCE_ID  SWE-bench instance under test
   DFC_STRICT       "0" to fail open on internal error (default: fail closed)

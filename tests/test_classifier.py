@@ -13,7 +13,7 @@ import pytest
 
 from dfc import classify
 from dfc.model import Outcome, Sink, Verb
-from dfc.policy import ARM0, ARM1, ARM2
+from dfc.policy import ARM0, ARM1
 
 
 def verbs(d):
@@ -169,13 +169,8 @@ def test_awk_reads_the_whole_stream():
 # Arm 2: scoped sed -i
 # --------------------------------------------------------------------------
 
-def test_sed_inplace_denied_in_arm1():
-    d = classify("sed -i '1,5s/a/b/' f.py", ARM1)
-    assert d.outcome is Outcome.DENIED
-
-
-def test_scoped_sed_allowed_in_arm2():
-    d = classify("sed -i '1,5s/old/new/' f.py", ARM2)
+def test_scoped_sed_allowed_in_arm1():
+    d = classify("sed -i '1,5s/old/new/' f.py", ARM1)
     assert d.outcome is Outcome.PASSTHROUGH
     assert Verb.WRITE in verbs(d)
 
@@ -189,18 +184,18 @@ def test_scoped_sed_allowed_in_arm2():
     "s/a/b/e",             # execute the pattern space
     "s/a/b/w /tmp/out",    # write via the s flag
 ])
-def test_sed_escape_hatches_denied_in_arm2(script):
-    d = classify(f"sed -i '{script}' f.py", ARM2)
+def test_sed_escape_hatches_denied_in_arm1(script):
+    d = classify(f"sed -i '{script}' f.py", ARM1)
     assert d.outcome is Outcome.DENIED, f"should have denied: sed -i '{script}'"
 
 
 def test_unaddressed_delete_denied():
-    d = classify("sed -i 'd' f.py", ARM2)
+    d = classify("sed -i 'd' f.py", ARM1)
     assert d.outcome is Outcome.DENIED
 
 
 def test_sed_script_file_denied():
-    d = classify("sed -i -f script.sed f.py", ARM2)
+    d = classify("sed -i -f script.sed f.py", ARM1)
     assert d.outcome is Outcome.DENIED
 
 
@@ -377,7 +372,7 @@ def test_git_network_is_not_infra(cmd):
 
 def test_infra_allowlist_identical_across_arms():
     from dfc.policy import INFRA_ALLOWLIST
-    for arm in (ARM0, ARM1, ARM2):
+    for arm in (ARM0, ARM1):
         assert arm.admits("cd") or arm.mode == "observe"
     assert set(INFRA_ALLOWLIST) == {
         "cd", "pwd", "true", "false", "exit", "echo", "pytest"

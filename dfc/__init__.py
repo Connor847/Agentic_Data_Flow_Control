@@ -10,12 +10,12 @@ from .model import (  # noqa: F401
     Action, Confidentiality, Decision, Integrity, Label, Outcome, Sink,
     Target, TargetKind, Verb,
 )
-from .policy import ARMS, ARM0, ARM1, ARM2, Arm  # noqa: F401
+from .policy import ARMS, ARM0, ARM1, Arm  # noqa: F401
 from .classifier import classify, parse_commands  # noqa: F401
 
 __all__ = [
     "Action", "Confidentiality", "Decision", "Integrity", "Label", "Outcome",
     "Sink", "Target", "TargetKind", "Verb",
-    "ARMS", "ARM0", "ARM1", "ARM2", "Arm",
+    "ARMS", "ARM0", "ARM1", "Arm",
     "classify", "parse_commands",
 ]

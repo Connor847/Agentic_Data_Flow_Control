@@ -32,7 +32,7 @@ PRIMITIVE_VERBS: dict[str, Verb] = {
     "grep": Verb.SEARCH,      # SEARCH or READ depending on selectivity of the pattern
     "tee": Verb.WRITE,
     "awk": Verb.TRANSFORM,    # D3 - restricted form only, see awk_admissible()
-    "sed": Verb.WRITE,        # Arm 2 only, and only scoped -i; see sed_admissible()
+    "sed": Verb.WRITE,        # D18 - Arm 1, and only scoped -i; see sed_admissible()
     "curl": Verb.FETCH,       # refined by the classifier into FETCH / WRITE(external)
     "head": Verb.TRANSFORM,   # D11 - stdin form only; see stream_truncator_admissible()
     "tail": Verb.TRANSFORM,   # D11 - stdin form only
@@ -91,7 +91,7 @@ class Arm:
     mode: str
     #: Base commands admissible in this arm, beyond INFRA_ALLOWLIST.
     primitives: frozenset[str]
-    #: Arm 2 admits address-scoped `sed -i`.
+    #: D18 - the enforcing arm admits address-scoped `sed -i`.
     allow_sed_inplace: bool = False
     #: D2 - fold non-canonical commands onto the primitive set via updatedInput.
     allow_rewrite: bool = True
@@ -114,24 +114,22 @@ ARM0 = Arm(
     allow_rewrite=False,
 )
 
-#: Arm 1 - four primitives plus restricted awk (D3).
+#: Arm 1 - the policed primitive set: four primitives, restricted awk (D3),
+#: stdin-only `head`/`tail` (D11), and address-scoped `sed -i` (D18).
 ARM1 = Arm(
     name="arm1-primitives",
-    mode="enforce",
-    primitives=frozenset({"ls", "grep", "curl", "tee", "awk", "head", "tail"}),
-)
-
-#: Arm 2 - Arm 1 plus address-scoped `sed -i`. The delta between the arms is the
-#: headline number: it prices coarse-grained writes.
-ARM2 = Arm(
-    name="arm2-scoped-sed",
     mode="enforce",
     primitives=frozenset({"ls", "grep", "curl", "tee", "awk", "sed", "head", "tail"}),
     allow_sed_inplace=True,
 )
 
-ARMS: dict[str, Arm] = {a.name: a for a in (ARM0, ARM1, ARM2)}
-ARMS.update({"arm0": ARM0, "arm1": ARM1, "arm2": ARM2})
+# Arm 2 - retired (D18). It was Arm 1 plus address-scoped `sed -i`; moving `sed -i`
+# into Arm 1 left the two byte-identical, so it tests nothing. The whole-file-rewrite
+# tax it existed to price is no longer measured - see D18 for what that costs.
+# `sed_admissible()` is unchanged; it now gates Arm 1.
+
+ARMS: dict[str, Arm] = {a.name: a for a in (ARM0, ARM1)}
+ARMS.update({"arm0": ARM0, "arm1": ARM1})
 
 
 # --------------------------------------------------------------------------
@@ -249,7 +247,7 @@ def _split_sed_script(script: str) -> list[str]:
 
 
 def sed_admissible(script: str, argv: list[str], arm: Arm) -> tuple[bool, str]:
-    """Arm 2: `sed -i` restricted to address-scoped `s///`, `d`, `i`, `a`.
+    """Arm 1 (D18): `sed -i` restricted to address-scoped `s///`, `d`, `i`, `a`.
 
     Rejects sed's escape hatches outright: `r`/`R` (read an unlisted file),
     `w`/`W` (write an unlisted file), `e` and the `s///e` flag (execute), `F`.
@@ -377,7 +375,7 @@ DENY_TOOLS = frozenset({
 
 
 __all__ = [
-    "Arm", "ARMS", "ARM0", "ARM1", "ARM2",
+    "Arm", "ARMS", "ARM0", "ARM1",
     "PRIMITIVE_VERBS", "INFRA_ALLOWLIST",
     "GIT_ALLOWED_SUBCOMMANDS", "GIT_NETWORK_SUBCOMMANDS", "PYTHON_NAMES",
     "awk_admissible", "sed_admissible", "curl_form",

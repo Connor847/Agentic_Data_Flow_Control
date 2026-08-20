@@ -222,20 +222,17 @@ python -m dfc.run evaluate --run-id <arm1-id> && python -m dfc.run report --run-
 produced the log. If the two runs show different fingerprints, their flow metrics are
 not comparable and it will say so.
 
-### 9.2 Smoke-test Arm 2 — it has never run
+### 9.2 Arm 2 is retired (D18)
 
-Arm 2 has an in-place editor, its own prompt block, and a `sed_admissible` parser that
-has only ever seen unit tests. The pilot gives a specific reason to expect it matters:
-corrected denial attribution puts `sed` second behind `python`, meaning the agent was
-already reaching for an in-place editor it did not have.
+Scoped `sed -i` moved into Arm 1, which left Arm 2 byte-identical to it. `arm2` is no
+longer a valid `--arm` value. What remains worth checking on the Arm 1 re-run is that
+the editor is actually *used*: grep the flow log for `sed -i` commands with outcome
+`passthrough`. If Arm 1 never reaches for it, D18's premise — that the agent was being
+denied an editor it wanted — is not showing up in this sample.
 
-```bash
-python -m dfc.run solve --n 8 --arm arm2 --max-turns 100
-```
-
-Check the flow log for `sed -i` commands that passed rather than being denied. If Arm 2
-never uses `sed -i`, the Arm 1 → Arm 2 delta measures nothing — which is what happened
-in the pilot, where the agent used `sed -i` once in 177 commands.
+Note that the whole-file-rewrite tax is no longer measured by any arm pair. If you want
+that number, add a no-editor ablation arm (`allow_sed_inplace=False`, `sed` out of
+`primitives`) rather than reviving `arm2` under its old name.
 
 ### 9.3 Scale
 
@@ -243,20 +240,20 @@ Only after 9.1 and 9.2 pass:
 
 ```bash
 for seed in 20260811 20260812 20260813; do
-  for arm in arm0 arm1 arm2; do
+  for arm in arm0 arm1; do
     python -m dfc.run solve --n 30 --arm $arm --seed $seed --max-turns 100 \
       --run-id dfc-$arm-s$seed
   done
 done
 ```
 
-Roughly 270 trajectories. Notes:
+Roughly 180 trajectories (2 arms × 3 seeds × n=30). Notes:
 
 - **Resume works.** If a run dies, re-issue the identical command with the same
   `--run-id`; completed trajectories are skipped. Only trajectories that ran at least
   one command count as complete, so harness errors are retried.
 - **Check your Agent SDK credit first.** The pilot averaged about $0.73 estimated per
-  Arm 1 instance, so 270 trajectories is very roughly $190 at list rates. That is an
+  Arm 1 instance, so 180 trajectories is very roughly $160 at list rates. That is an
   estimate, not a bill, but the monthly Agent SDK credit is finite and overflow goes to
   usage credits. Look at `/usage` before starting.
 - **Same seed across arms.** The comparison is paired; McNemar's test depends on it.

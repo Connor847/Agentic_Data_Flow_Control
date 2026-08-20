@@ -11,7 +11,7 @@ import pytest
 
 from dfc import canon, classify
 from dfc.model import Outcome, Verb
-from dfc.policy import ARM0, ARM1, ARM2
+from dfc.policy import ARM0, ARM1
 from dfc.solver import system_prompt_for
 
 
@@ -60,7 +60,7 @@ def test_head_has_no_escape_surface_to_constrain():
 
 def test_truncators_present_in_both_enforcing_arms():
     from dfc.policy import STREAM_TRUNCATORS
-    for arm in (ARM1, ARM2):
+    for arm in (ARM1,):
         assert STREAM_TRUNCATORS <= arm.primitives
 
 
@@ -207,21 +207,16 @@ def test_restricted_arm_is_told_the_write_idiom():
     assert "grep \"\" path" in p
 
 
-def test_arm1_is_not_told_about_sed():
+def test_arm1_is_told_about_scoped_sed():
+    """D12: an enforcing arm is told what it may use. D18 moved `sed -i` into Arm 1,
+    so Arm 1's prompt must now carry the scoped form."""
     p = system_prompt_for(ARM1)
-    assert "sed -i" not in p
-
-
-def test_arm2_is_told_about_scoped_sed():
-    """The Arm1/Arm2 delta is the headline number, and it is zero if Arm 2 never
-    reaches for the in-place editor."""
-    p = system_prompt_for(ARM2)
     assert "sed -i '42s/old/new/'" in p
 
 
 def test_arms_differ_only_by_the_appended_block():
     from dfc.solver import SYSTEM_PROMPT
-    for arm in (ARM1, ARM2):
+    for arm in (ARM1,):
         assert system_prompt_for(arm).startswith(SYSTEM_PROMPT)
 
 
@@ -235,24 +230,24 @@ MULTILINE_APPEND = "sed -i '456a\\\n    def foo(self):\n        return 1' f.py"
 def test_multiline_append_is_admissible():
     """The text block was being parsed as commands: `def foo(self):` read as an
     unaddressed `d`, `return 1` as an `r`. It denied 19 of 91 sed -i calls in the
-    Arm 2 run - the single capability Arm 2 exists to provide."""
-    assert classify(MULTILINE_APPEND, ARM2).outcome is Outcome.PASSTHROUGH
+    Arm 2 run - the single capability scoped sed exists to provide (D17)."""
+    assert classify(MULTILINE_APPEND, ARM1).outcome is Outcome.PASSTHROUGH
 
 
 def test_multiline_insert_is_admissible():
-    d = classify("sed -i '5i\\\nimport os\nimport sys' f.py", ARM2)
+    d = classify("sed -i '5i\\\nimport os\nimport sys' f.py", ARM1)
     assert d.outcome is Outcome.PASSTHROUGH
 
 
 def test_append_text_containing_sed_syntax_is_text():
     """`sed '1a foo; w /tmp/x'` appends the whole string as text - GNU sed does not
     read `w` as a command there, and neither may we."""
-    d = classify("sed -i '5a\\\ntext with ; and w /tmp/x inside' f.py", ARM2)
+    d = classify("sed -i '5a\\\ntext with ; and w /tmp/x inside' f.py", ARM1)
     assert d.outcome is Outcome.PASSTHROUGH
 
 
 def test_insert_still_requires_an_address():
-    d = classify("sed -i 'a\\\nsome text' f.py", ARM2)
+    d = classify("sed -i 'a\\\nsome text' f.py", ARM1)
     assert d.outcome is Outcome.DENIED
     assert "address" in d.reason
 
@@ -264,13 +259,9 @@ def test_insert_still_requires_an_address():
     ("11,15c\\\nnew", "c"),
 ])
 def test_escape_hatches_still_denied_after_the_fix(script, needle):
-    d = classify(f"sed -i '{script}' f.py", ARM2)
+    d = classify(f"sed -i '{script}' f.py", ARM1)
     assert d.outcome is Outcome.DENIED
 
 
 def test_unaddressed_delete_still_denied():
-    assert classify("sed -i 'd' f.py", ARM2).outcome is Outcome.DENIED
-
-
-def test_arm1_still_refuses_sed_inplace():
-    assert classify(MULTILINE_APPEND, ARM1).outcome is Outcome.DENIED
+    assert classify("sed -i 'd' f.py", ARM1).outcome is Outcome.DENIED

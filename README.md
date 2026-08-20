@@ -34,8 +34,12 @@ the finding. Resolve rate alone is not.
 | Arm | Tools | Purpose |
 |---|---|---|
 | **0 — baseline** | Unrestricted shell. The classifier runs in observe-only mode: it parses, classifies and logs, but never blocks or rewrites | Control, and the source of the natural command distribution |
-| **1 — primitives** | `ls`, `grep`, `curl`, `tee`/`>`, restricted `awk`, `head`/`tail` on a pipe, plus a fixed infrastructure allowlist | The restriction |
-| **2 — scoped sed** | Arm 1 plus address-scoped `sed -i` (`s///`, `d`, `i`, `a`) | Prices the whole-file-rewrite tax |
+| **1 — primitives** | `ls`, `grep`, `curl`, `tee`/`>`, restricted `awk`, `head`/`tail` on a pipe, address-scoped `sed -i` (`s///`, `d`, `i`, `a`), plus a fixed infrastructure allowlist | The restriction |
+
+A third arm — Arm 1 without the in-place editor — was retired in **D18** when scoped
+`sed -i` moved into Arm 1. It priced the whole-file-rewrite tax, which is consequently
+no longer measured; `Arm(allow_sed_inplace=False)` reconstructs it if that number is
+wanted back.
 
 Commands with an admissible canonical rewrite are **silently rewritten** — the agent
 writes `cat f`, the container runs `grep "" f`, and it is not told. Commands with no
@@ -106,7 +110,7 @@ Each of these cost real time and is recorded in `DECISIONS.md`.
 ## Tests
 
 ```bash
-python -m pytest tests/ -q      # 247 tests, no Docker or API access required
+python -m pytest tests/ -q      # 244 tests, no Docker or API access required
 ```
 
 The suite covers the adversarial cases the design depends on: `curl file://` vs `curl -o`

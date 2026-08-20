@@ -39,3 +39,7 @@ __pycache__/
 # Result artefacts: published separately, not in the repo (see README)
 command_census.csv
 dfc-sonnet5.*.json
+
+# Retired run artefacts parked under outdated/ (same rule as runs/)
+outdated/runs-abandoned/
+outdated/_to_delete/

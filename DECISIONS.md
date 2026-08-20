@@ -488,3 +488,63 @@ fingerprint before their delta means anything.
 **Also worth noting:** Arm 2 used *more* turns than Arm 1 (347 vs 284), not fewer. The
 hypothesis was that an in-place editor removes the whole-file-rewrite tax. With 19 false
 denials forcing retries, this run cannot test that; the re-run can.
+
+---
+
+## D18 — Scoped `sed -i` moves into Arm 1; Arm 2 retired (2026-08-17)
+
+Arm 1 was `ls`, `grep`, `curl`, `tee`/`>`, restricted `awk` (D3) and stdin-only
+`head`/`tail` (D11). Address-scoped `sed -i` sat in a separate Arm 2, on the plan's
+§2 argument that the Arm 1 → Arm 2 delta prices the whole-file-rewrite tax.
+
+**Decision.** Scoped `sed -i` (`s///`, `d`, `i`, `a`, address-required for `d`) is a
+member of the Arm 1 primitive set. Arm 2 was Arm 1 plus exactly that, so it is now
+byte-identical to Arm 1 and is **retired**: removed from `ARMS`, `ARM2` deleted from
+`policy.py` and the package exports. The experiment runs two arms.
+
+**Two reasons, and they are independent.**
+
+1. *It passes the admission criterion on §2's own terms.* Address-scoped `sed -i` maps
+   to exactly one verb (`write-int`) and its targets are statically extractable from the
+   command line — the same test `grep`, `ls` and `tee` pass. `sed_admissible()` already
+   rejects every escape hatch that would break this (`r`/`R`/`w`/`W`/`e`, `s///e`,
+   `s///w`, `-f progfile`, unaddressed `d`). It was split into its own arm for
+   experimental convenience, not because it failed admission. An Arm 1 without any
+   in-place editor is a restriction we would never propose deploying, and measuring its
+   cost measures a strawman.
+2. *The denial data says so.* `sed` is the second most-denied command in Arm 1 — 22
+   denials at n=30, 11 at n=8, behind only `python` (D15.3). §7 says the v2 primitive
+   set should be driven by what agents actually reach for rather than by enumeration.
+   This is that principle applied to its clearest case.
+
+**Note: canon was already correct.** `canon.py` has carried `sed_inplace` (CSV row 21,
+base `tee`, WRITE, status `Native`) since the table was ported. The canonicalization
+layer always treated `sed -i` as a native write primitive; only the Arm 1 policy gate
+excluded it. This change is policy-only — no canon rule was added or altered.
+
+**Consequence, and it is the real cost of this decision.** The whole-file-rewrite tax is
+**no longer measured**. §2 calls the Arm 1 → Arm 2 delta "the headline number"; there is
+now no arm pair that isolates it, and Arm 2 never produced a clean measurement of it
+before being retired — its one run (5/8, D17) carried 19 false `sed -i` denials and ran
+on a fingerprint no other arm shared. The paper must either drop that claim or reinstate
+the no-editor configuration as an ablation arm. The `Arm` dataclass still supports it:
+`allow_sed_inplace=False` with `sed` absent from `primitives` reconstructs the old Arm 1
+in two lines, and `sed_admissible()` is untouched.
+
+**Mechanical effects.**
+
+- Classifier fingerprint moves to `c0b87151304a`. Every run in `runs/` was already on a
+  stale fingerprint, so nothing comparable is lost.
+- Three tests asserting Arm 1 has no in-place editor are removed
+  (`test_sed_inplace_denied_in_arm1`, `test_arm1_is_not_told_about_sed`,
+  `test_arm1_still_refuses_sed_inplace`); the scoped-`sed` suite now runs against Arm 1.
+  244 tests pass.
+- Arm 1's D12 prompt block now carries the scoped `sed -i` form, since
+  `system_prompt_for` keys off `allow_sed_inplace`.
+- The §9.3 scale run drops from 270 trajectories to 180 (2 arms × 3 seeds × n=30),
+  roughly $160–200 at the observed per-instance rates rather than $230–280.
+
+**Still open from D17:** whether to admit `c` (change). It is `d` followed by `i`,
+address-scoped, with no escape surface the admitted three lack, and it is currently
+denied by name because the plan's subset is `s, d, i, a`. That question now applies to
+Arm 1 rather than Arm 2.

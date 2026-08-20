@@ -45,7 +45,7 @@ python -m dfc.cli mine ../SWE-bench_Pro-os/traj --arm arm1
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `DFC_ARM` | `arm1` | `arm0` (observe-only), `arm1` (primitives), `arm2` (+ scoped `sed -i`) |
+| `DFC_ARM` | `arm1` | `arm0` (observe-only), `arm1` (primitives, incl. scoped `sed -i` — D18) |
 | `DFC_FLOW_LOG` | `./flow_log.jsonl` | Append-only flow log |
 | `DFC_INSTANCE_ID` | — | SWE-bench instance under test |
 | `DFC_STRICT` | `1` | `0` makes an internal classifier error fail open even under enforcement |
