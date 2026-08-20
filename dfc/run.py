@@ -37,6 +37,7 @@ RUNS_DIR = Path(os.environ.get("DFC_RUNS_DIR", "runs"))
 TAXONOMY = [
     "resolved",
     "empty-patch",            # agent produced no diff at all
+    "empty-patch-after-success",  # D19: trajectory ended cleanly but no diff came back
     "patch-malformed",        # harness could not apply the diff
     "applied-broke-P2P",      # applied, but previously-passing tests now fail
     "applied-F2P-unfixed",    # applied cleanly, target tests still fail
@@ -55,7 +56,16 @@ def classify_failure(traj: dict, report: dict | None, denial_rate: float,
     if traj.get("error"):
         return "harness-error"
     if not traj.get("model_patch"):
-        return "turn-limit" if traj.get("stop_reason") == "turn-limit" else "empty-patch"
+        if traj.get("stop_reason") == "turn-limit" or traj.get("cap_bound"):
+            return "turn-limit"
+        # D19: a trajectory that ran to completion, issued commands and then yielded
+        # no diff is a patch-extraction failure until proven otherwise, not a model
+        # that declined to edit anything. The first instance of this was `git add -A`
+        # running in the agent's last cwd (`/tmp/...`) instead of the repo. Separated
+        # from `empty-patch` so it cannot be silently scored as a model failure again.
+        if traj.get("stop_reason") == "success" and (traj.get("tool_stats") or {}).get("calls", 0) > 0:
+            return "empty-patch-after-success"
+        return "empty-patch"
     if report is None:
         return "harness-error"
     if report.get("resolved"):
@@ -251,6 +261,36 @@ def cmd_doctor(args) -> int:
 # solve
 # --------------------------------------------------------------------------
 
+def _retryable_harness_failure(traj: dict) -> bool:
+    """A completed-looking trajectory that is really one of our failures (D19)."""
+    if traj.get("model_patch"):
+        return False
+    if traj.get("cap_bound") or traj.get("stop_reason") == "turn-limit":
+        return False          # a genuine turn-limit result, not our bug
+    return traj.get("stop_reason") == "success"
+
+
+def _prune_flow_log(path: Path, instance_ids: set[str]) -> int:
+    """Drop records for instances about to be re-run. The log is append-only, so
+    without this a retry leaves both attempts in it."""
+    if not path.exists():
+        return 0
+    kept, dropped = [], 0
+    for line in path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            if json.loads(line).get("instance_id") in instance_ids:
+                dropped += 1
+                continue
+        except json.JSONDecodeError:
+            pass
+        kept.append(line)
+    if dropped:
+        path.write_text("\n".join(kept) + ("\n" if kept else ""))
+    return dropped
+
+
 async def _solve_all(instances, arm, run_dir: Path, args) -> list[dict]:
     # Resume: a long run will be interrupted - docker hiccup, rate limit, laptop
     # sleep - and without this a single failure at instance 200 discards 200
@@ -258,6 +298,7 @@ async def _solve_all(instances, arm, run_dir: Path, args) -> list[dict]:
     # harness-error record is retried rather than cemented.
     trajectories: list[dict] = []
     done: set[str] = set()
+    retried: set[str] = set()
     existing = run_dir / "trajectories.json"
     if existing.exists():
         try:
@@ -265,12 +306,29 @@ async def _solve_all(instances, arm, run_dir: Path, args) -> list[dict]:
         except json.JSONDecodeError:
             prior = []
         for t in prior:
-            if t.get("tool_stats", {}).get("calls", 0) > 0:
-                trajectories.append(t)
-                done.add(t["instance_id"])
-        if done:
+            if t.get("tool_stats", {}).get("calls", 0) <= 0:
+                continue
+            if _retryable_harness_failure(t):
+                # D19: commands ran, the trajectory ended cleanly, and no diff came
+                # back. That was our patch extraction following the agent's cwd out of
+                # the repo, not a model that declined to edit. Same argument as the
+                # harness-error case above: retry it rather than cement it.
+                retried.add(t["instance_id"])
+                continue
+            trajectories.append(t)
+            done.add(t["instance_id"])
+        if done or retried:
             print(f"resuming  : {len(done)} trajectory(ies) already complete, "
-                  f"{len(instances) - len(done)} to go\n")
+                  f"{len(instances) - len(done)} to go")
+            if retried:
+                print(f"retrying  : {len(retried)} with an empty patch after a clean "
+                      f"finish (D19): {', '.join(sorted(retried))}")
+            print()
+        # Keep the flow log consistent with trajectories.json: a retried instance
+        # would otherwise contribute two sets of records and inflate the coverage
+        # denominator it feeds.
+        if retried:
+            _prune_flow_log(run_dir / "flow_log.jsonl", retried)
 
     dead = 0
     for i, inst in enumerate(instances, 1):

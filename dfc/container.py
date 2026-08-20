@@ -138,12 +138,24 @@ class InstanceContainer:
 
     # -- execution ------------------------------------------------------
 
-    def exec(self, command: str, timeout: int = 300) -> dict:
+    def exec(self, command: str, timeout: int = 300, *,
+             workdir: str | None = None, track_cwd: bool = True) -> dict:
         """Run one shell command inside the container.
 
         `cd` is tracked across calls because `docker exec` is stateless. The command
         runs as `cd <workdir> && <command>`, and the resulting cwd is read back so the
         next call lands where the agent expects.
+
+        `workdir` pins this one call to a directory without consulting the tracked
+        cwd, and `track_cwd=False` stops it writing the tracked cwd back. Housekeeping
+        that must run against the repo - patch extraction, the write set, reset - uses
+        both, because the agent's tracked cwd is wherever *it* last wandered.
+
+        D19: an agent that ended its trajectory with `cd /tmp/scratch` left `workdir`
+        pointing outside the repo, so `git add -A` ran in a non-repo directory, exited
+        non-zero, and `model_patch()` returned "". The trajectory was scored as an
+        empty patch with `stop_reason: success`, indistinguishable from a model that
+        simply never edited anything.
         """
         if not self.container_id:
             raise DockerError("container is not running")
@@ -151,8 +163,9 @@ class InstanceContainer:
         # Emit the post-command cwd on a private sentinel line so it can be stripped
         # from what the agent sees.
         sentinel = "__DFC_CWD__"
+        start_dir = workdir if workdir is not None else self.workdir
         wrapped = (
-            f"cd {shlex.quote(self.workdir)} 2>/dev/null || cd {TESTBED}; "
+            f"cd {shlex.quote(start_dir)} 2>/dev/null || cd {TESTBED}; "
             f"{{ {command}\n}}; __rc=$?; printf '\\n{sentinel}%s\\n' \"$PWD\"; exit $__rc"
         )
         args = ["docker", "exec", "-i", self.container_id, "bash", "-lc", wrapped]
@@ -167,7 +180,7 @@ class InstanceContainer:
             }
 
         stdout, cwd = _split_sentinel(p.stdout, sentinel)
-        if cwd:
+        if cwd and track_cwd:
             self.workdir = cwd
         return {
             "exit_code": p.returncode,
@@ -179,19 +192,23 @@ class InstanceContainer:
 
     # -- patch extraction ------------------------------------------------
 
+    def _repo_exec(self, command: str, timeout: int = 120) -> dict:
+        """Run housekeeping against the repo, wherever the agent left its cwd (D19)."""
+        return self.exec(command, timeout=timeout, workdir=TESTBED, track_cwd=False)
+
     def model_patch(self) -> str:
         """§8 R5: the patch is produced by `git diff` at the end of the trajectory, not
         by the model emitting diff text. This is what killed the previous run - invented
         paths and fabricated blob hashes cannot happen when the diff comes from git."""
-        add = self.exec("git add -A", timeout=120)
+        add = self._repo_exec("git add -A", timeout=120)
         if add["exit_code"] != 0:
             return ""
-        res = self.exec("git diff --cached --no-color", timeout=120)
+        res = self._repo_exec("git diff --cached --no-color", timeout=120)
         return res["stdout"] if res["exit_code"] == 0 else ""
 
     def dirty_paths(self) -> list[str]:
         """Write set, cheaply. §6.4 prefers this over `docker diff` for a repo."""
-        res = self.exec("git status --porcelain", timeout=120)
+        res = self._repo_exec("git status --porcelain", timeout=120)
         out = []
         for line in res["stdout"].splitlines():
             if len(line) > 3:
@@ -199,7 +216,7 @@ class InstanceContainer:
         return out
 
     def reset(self) -> None:
-        self.exec("git checkout -- . && git clean -fd", timeout=180)
+        self._repo_exec("git checkout -- . && git clean -fd", timeout=180)
 
 
 def _split_sentinel(stdout: str, sentinel: str) -> tuple[str, str]:

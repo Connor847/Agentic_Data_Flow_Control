@@ -548,3 +548,77 @@ in two lines, and `sed_admissible()` is untouched.
 address-scoped, with no escape surface the admitted three lack, and it is currently
 denied by name because the plan's subset is `s, d, i, a`. That question now applies to
 Arm 1 rather than Arm 2.
+
+---
+
+## D19 — Patch extraction ran in the agent's cwd, not the repo (2026-08-20)
+
+The n=8 gate re-run of Arm 0 at a 150-turn cap returned `pylint-dev__pylint-7228` with
+`stop_reason: success`, `cap_bound: False`, `turns: 53`, **`model_patch_bytes: 0`** and
+`dirty_paths: []`, while the agent's own closing summary named four files it had
+changed. The same instance at a 100-turn cap produced a 10,286-byte patch. The work was
+done and then lost.
+
+**Cause.** `container.exec()` tracks the working directory across calls, because
+`docker exec` is stateless and without tracking the agent's second command silently runs
+in the wrong place (D9, consequence 2). The tracked cwd is read back from `$PWD` after
+every command. This trajectory's final command was
+
+    cd /testbed && python -m pytest ... && cd /tmp/rxgtest && python -m pylint t.py t2.py
+
+leaving `self.workdir = /tmp/rxgtest`. `model_patch()` then called
+`self.exec("git add -A")`, which is wrapped as `cd '/tmp/rxgtest' ... ; git add -A`.
+The directory existed, so the `cd` succeeded, `git add -A` ran outside any repository
+and exited non-zero, and `model_patch()` returned `""` by its own guard.
+`dirty_paths()` failed the same way, which is why the write set was empty too.
+
+**This is our harness, not SWE-bench's.** The official harness received an empty
+`model_patch` in `predictions.json` and correctly reported an empty patch. Everything
+downstream behaved. The defect is an interaction between two independently sound
+decisions: D9's cwd tracking (necessary) and §8 R5's "the patch is produced by
+`git diff` at end of trajectory" (necessary). Neither is wrong; nothing connected them.
+
+**Decision.** `exec()` gains `workdir=` (pin this call, ignore the tracked cwd) and
+`track_cwd=False` (do not write the tracked cwd back). `model_patch()`, `dirty_paths()`
+and `reset()` go through a new `_repo_exec()` helper that sets both, so housekeeping
+always runs in `/testbed` regardless of where the agent wandered, and pinning never
+disturbs where the agent thinks it is.
+
+**Second layer, because the first failure mode was silence.** A trajectory that ends
+cleanly, issues commands and yields no diff is now classified
+`empty-patch-after-success` rather than `empty-patch`. The distinction matters: the
+former is a patch-extraction failure until proven otherwise, the latter is a model that
+declined to edit. Scoring the first as the second is what let this run for a full
+instance without anyone noticing, and at 180 trajectories it would have silently
+depressed whichever arm happened to wander.
+
+**Consequence for the gate runs.** The classifier fingerprint is **unchanged** at
+`c0b87151304a` — `container.py` and `run.py` are deliberately outside `FINGERPRINTED`,
+which covers only the three modules that decide what a command *means*. So
+`dfc-arm1-gate-c0b8` and `dfc--gate-c0b8` remain valid and comparable. Only the
+`dfc-arm0-gate-c0b8` result for `pylint-7228` is affected, and it is a false negative:
+Arm 0's honest n=8 score is **5/8**, tied with Arm 1, not 4/8.
+
+**Also worth recording.** `git stash` was the first suspect — the trajectory contains
+`git stash && pytest ... ; git stash pop` — and it was wrong. The compound command
+exited 0, meaning the pop succeeded. It is on `INFRA_ALLOWLIST` and remains there. The
+lesson is the same one D16 recorded from the other direction: check the exit code before
+building a theory on the command text.
+
+251 tests pass, including four that drift the tracked cwd to `/tmp/rxgtest` and assert
+both git calls still land in `/testbed`.
+
+**Follow-on: resume cemented the bad record.** Re-running the identical `solve` command
+reported `8 trajectory(ies) already complete, 0 to go`. D14's resume predicate is
+`tool_stats.calls > 0`, and the lost-patch trajectory made 51 calls, so it counted as
+finished. D14's own rationale — "a harness-error record is retried rather than
+cemented" — applies verbatim here; the record simply was not recognised as a harness
+error. `_retryable_harness_failure()` now re-runs any trajectory that made calls, ended
+with `stop_reason: success`, was not cap-bound, and produced no patch. A cap-bound empty
+patch is left alone: that is a real result about the turn budget, not our bug.
+
+Retrying also has to prune the flow log, which is append-only. Without
+`_prune_flow_log()` a retried instance contributes two sets of records to the same file
+and silently inflates the coverage denominator those records feed.
+
+256 tests pass.

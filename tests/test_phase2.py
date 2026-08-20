@@ -26,6 +26,80 @@ def test_sentinel_split_strips_private_line_and_recovers_cwd():
     assert "__DFC_CWD__" not in text
 
 
+# --------------------------------------------------------------------------
+# D19 - housekeeping must run in the repo, not the agent's last cwd
+# --------------------------------------------------------------------------
+
+class _CwdSpy:
+    """Records the directory each exec would start in, and drifts cwd like the real
+    thing does when the agent ends a command elsewhere."""
+
+    def __init__(self, drift="/tmp/rxgtest"):
+        self.container_id = "cid"
+        self.workdir = container.TESTBED
+        self.drift = drift
+        self.seen: list[str] = []
+
+    exec = container.InstanceContainer.exec
+    _repo_exec = container.InstanceContainer._repo_exec
+    model_patch = container.InstanceContainer.model_patch
+    dirty_paths = container.InstanceContainer.dirty_paths
+    reset = container.InstanceContainer.reset
+
+
+def _spy(monkeypatch, drift="/tmp/rxgtest"):
+    c = _CwdSpy(drift)
+
+    def fake_run(args, timeout=600):
+        wrapped = args[-1]
+        c.seen.append(wrapped.split("cd ", 1)[1].split(" 2>/dev/null", 1)[0].strip("'"))
+        import subprocess
+        return subprocess.CompletedProcess(
+            args, 0, stdout=f"out\n__DFC_CWD__{c.drift}\n", stderr="")
+
+    monkeypatch.setattr(container, "_run", fake_run)
+    return c
+
+
+def test_agent_cwd_drifts_but_patch_extraction_stays_in_the_repo(monkeypatch):
+    """The bug this exists for: an agent that finished with `cd /tmp/rxgtest` left the
+    tracked cwd outside the repo, so `git add -A` ran in a non-repo directory, exited
+    non-zero, and the patch came back empty on a trajectory that had really edited
+    files. Both git calls must be pinned to /testbed."""
+    c = _spy(monkeypatch)
+    c.exec("cd /tmp/rxgtest && pylint t.py")       # agent wanders off
+    assert c.workdir == "/tmp/rxgtest"             # tracked cwd follows it, as designed
+    c.seen.clear()
+    c.model_patch()
+    assert c.seen == [container.TESTBED, container.TESTBED]
+
+
+def test_housekeeping_does_not_clobber_the_agents_cwd(monkeypatch):
+    """Pinning must not reset where the agent thinks it is."""
+    c = _spy(monkeypatch)
+    c.exec("cd /tmp/rxgtest && ls")
+    c.model_patch(); c.dirty_paths(); c.reset()
+    assert c.workdir == "/tmp/rxgtest"
+
+
+def test_dirty_paths_and_reset_are_pinned_too(monkeypatch):
+    c = _spy(monkeypatch)
+    c.exec("cd /tmp/rxgtest && ls")
+    c.seen.clear()
+    c.dirty_paths()
+    c.reset()
+    assert c.seen == [container.TESTBED, container.TESTBED]
+
+
+def test_explicit_workdir_overrides_tracked_cwd(monkeypatch):
+    c = _spy(monkeypatch)
+    c.exec("cd /tmp/rxgtest && ls")
+    c.seen.clear()
+    c.exec("ls", workdir="/somewhere", track_cwd=False)
+    assert c.seen == ["/somewhere"]
+    assert c.workdir == "/tmp/rxgtest"
+
+
 def test_sentinel_absent_leaves_output_alone():
     from dfc.container import _split_sentinel
     text, cwd = _split_sentinel("just output", "__DFC_CWD__")
@@ -259,6 +333,68 @@ def test_harness_error_beats_everything():
 
 def test_empty_patch():
     assert run.classify_failure({"model_patch": ""}, None, 0.0, False) == "empty-patch"
+
+
+def test_resume_retries_an_empty_patch_after_clean_finish():
+    """D19: resume keyed on `calls > 0`, so the pylint trajectory that lost its patch
+    to the cwd bug was cemented as complete and could not be re-run."""
+    assert run._retryable_harness_failure(
+        {"model_patch": "", "stop_reason": "success", "tool_stats": {"calls": 51}})
+
+
+def test_resume_keeps_a_real_result():
+    assert not run._retryable_harness_failure(
+        {"model_patch": "diff --git a/x b/x", "stop_reason": "success"})
+
+
+def test_resume_does_not_retry_a_genuine_turn_limit():
+    """A cap-bound empty patch is a real result about the budget, not our bug."""
+    assert not run._retryable_harness_failure(
+        {"model_patch": "", "stop_reason": "success", "cap_bound": True})
+    assert not run._retryable_harness_failure(
+        {"model_patch": "", "stop_reason": "turn-limit"})
+
+
+def test_prune_flow_log_drops_only_the_retried_instance(tmp_path):
+    """The log is append-only, so a retry would otherwise leave two attempts in it and
+    inflate the coverage denominator."""
+    import json as _json
+    log = tmp_path / "flow_log.jsonl"
+    log.write_text("\n".join(_json.dumps({"instance_id": i, "outcome": "observed"})
+                              for i in ["a", "b", "a", "c"]) + "\n")
+    dropped = run._prune_flow_log(log, {"a"})
+    assert dropped == 2
+    left = [_json.loads(l)["instance_id"] for l in log.read_text().splitlines() if l.strip()]
+    assert left == ["b", "c"]
+
+
+def test_prune_flow_log_is_a_noop_when_nothing_matches(tmp_path):
+    import json as _json
+    log = tmp_path / "flow_log.jsonl"
+    body = _json.dumps({"instance_id": "b", "outcome": "observed"}) + "\n"
+    log.write_text(body)
+    assert run._prune_flow_log(log, {"a"}) == 0
+    assert log.read_text() == body
+
+
+def test_empty_patch_after_success_is_its_own_class():
+    """D19: a clean finish with commands run and no diff is a patch-extraction
+    failure until proven otherwise, not a model that declined to edit."""
+    assert run.classify_failure(
+        {"model_patch": "", "stop_reason": "success", "tool_stats": {"calls": 51}},
+        None, 0.0, False) == "empty-patch-after-success"
+
+
+def test_empty_patch_stays_empty_patch_when_nothing_ran():
+    assert run.classify_failure(
+        {"model_patch": "", "stop_reason": "success", "tool_stats": {"calls": 0}},
+        None, 0.0, False) == "empty-patch"
+
+
+def test_cap_bound_empty_patch_is_still_turn_limit():
+    assert run.classify_failure(
+        {"model_patch": "", "stop_reason": "success", "cap_bound": True,
+         "tool_stats": {"calls": 51}}, None, 0.0, False) == "turn-limit"
 
 
 def test_turn_limit():
