@@ -118,6 +118,13 @@ vs `curl -K`, `grep pat f > out` as simultaneously a read and a write, restricte
 escapes, `sed` escape hatches, heredoc writes, command substitution. Several tests exist
 because a real run found the bug first; those are labelled.
 
+## Published results
+
+`results/command_census.csv` is the empirical distribution of bash commands the agent
+reached for during the 21 Aug 2026 scale run (180 trajectories, single classifier
+fingerprint). `results/COMMAND_CENSUS.md` documents its provenance, counting rules and
+the two coverage numbers it supports.
+
 ## What is not published here
 
 `runs/` and `logs/` are gitignored — they hold flow logs, trajectories and harness
