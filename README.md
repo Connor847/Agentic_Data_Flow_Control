@@ -111,6 +111,11 @@ Each of these cost real time and is recorded in `DECISIONS.md`.
   873 KB patch four times running. The write set is now snapshotted at container start
   and subtracted, and a patch over 250 KB is refused as a harness error (D20). Check
   `preexisting_dirty` in `trajectories.json` if a patch looks wrong.
+- **The agent can pick the same fixture path the hidden test patch creates.** `git
+  apply` then refuses the whole test patch and the trajectory is graded against tests
+  that were never installed (`flask-4992`, `sphinx-8595`). Paths the test patch touches
+  are dropped from the submitted patch at extraction; `reserved_collisions` in
+  `trajectories.json` says when that happened (D21).
 
 ## Tests
 

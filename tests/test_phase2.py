@@ -40,6 +40,8 @@ class _CwdSpy:
         self.drift = drift
         self.seen: list[str] = []
         self.preexisting_dirty: list[str] = []
+        self.reserved_paths: list[str] = []
+        self.reserved_collisions: list[str] = []
 
     exec = container.InstanceContainer.exec
     _repo_exec = container.InstanceContainer._repo_exec
@@ -111,16 +113,17 @@ class _GitSpy(_CwdSpy):
     """A fake repo: `status` reports whatever `self.status` holds, `diff --cached`
     returns `self.diff`, and every git command line is recorded verbatim."""
 
-    def __init__(self, status="", diff=""):
+    def __init__(self, status="", diff="", staged=""):
         super().__init__()
         self.status = status
         self.diff = diff
+        self.staged = staged      # what `git diff --cached --name-only` reports
         self.cmds: list[str] = []
 
 
-def _git(monkeypatch, status="", diff=""):
+def _git(monkeypatch, status="", diff="", staged=""):
     import subprocess
-    c = _GitSpy(status, diff)
+    c = _GitSpy(status, diff, staged)
 
     def fake_run(args, timeout=600):
         wrapped = args[-1]
@@ -129,6 +132,8 @@ def _git(monkeypatch, status="", diff=""):
         out = ""
         if inner.startswith("git status --porcelain"):
             out = c.status
+        elif inner.startswith("git diff --cached --name-only"):
+            out = c.staged
         elif inner.startswith("git diff --cached"):
             out = c.diff
         return subprocess.CompletedProcess(
@@ -227,6 +232,110 @@ def test_solver_classifies_a_refused_patch_as_harness_error():
     traj = {"error": "patch extraction: PatchTooLarge: 873799 bytes", "model_patch": "",
             "stop_reason": "success", "tool_stats": {"calls": 9}}
     assert classify_failure(traj, None, 0.0, False) == "harness-error"
+
+
+# --------------------------------------------------------------------------
+# D21 - paths the hidden test patch owns must not be in the submitted patch
+# --------------------------------------------------------------------------
+
+FLASK_4992_TEST_PATCH = """\
+diff --git a/tests/static/config.toml b/tests/static/config.toml
+new file mode 100644
+index 0000000..cba9c5a
+--- /dev/null
++++ b/tests/static/config.toml
+@@ -0,0 +1,2 @@
++TEST_KEY = "foo"
++SECRET_KEY = "config"
+diff --git a/tests/test_config.py b/tests/test_config.py
+--- a/tests/test_config.py
++++ b/tests/test_config.py
+@@ -37,6 +37,18 @@ def test_config_from_file():
++def test_config_from_file_toml():
++    pass
+"""
+
+
+def test_paths_in_patch_reads_every_diff_header():
+    assert container.paths_in_patch(FLASK_4992_TEST_PATCH) == [
+        "tests/static/config.toml", "tests/test_config.py",
+    ]
+
+
+def test_paths_in_patch_keeps_both_sides_of_a_rename():
+    p = "diff --git a/tests/old.py b/tests/new.py\nsimilarity index 90%\n"
+    assert container.paths_in_patch(p) == ["tests/old.py", "tests/new.py"]
+
+
+def test_paths_in_patch_handles_empty():
+    assert container.paths_in_patch("") == []
+    assert container.paths_in_patch(None) == []
+
+
+def test_reserved_paths_are_unstaged_before_the_diff(monkeypatch):
+    """flask-4992: the agent created tests/static/config.toml as a fixture for its
+    own test. The hidden test patch creates the same file; `git apply` refused, the
+    whole test patch was dropped, and the trajectory was graded against tests that
+    were never installed - four times out of four. Dropping the reserved paths from
+    the submitted patch is what lets the harness install its tests."""
+    c = _git(monkeypatch, staged="src/flask/config.py\ntests/test_config.py\ntests/static/config.toml\n",
+             diff="diff --git a/src/flask/config.py b/src/flask/config.py\n+fix\n")
+    c.reserved_paths = container.paths_in_patch(FLASK_4992_TEST_PATCH)
+    c.snapshot_start_state()
+    c.cmds.clear()
+    patch = c.model_patch()
+    assert patch.startswith("diff --git a/src/flask/config.py")
+    assert c.cmds == [
+        "git add -A",
+        "git diff --cached --name-only",
+        "git reset -q -- tests/static/config.toml tests/test_config.py",
+        "git diff --cached --no-color",
+    ]
+
+
+def test_collisions_are_recorded_and_only_the_real_ones(monkeypatch):
+    """The record must say which reserved paths the agent actually wrote, not merely
+    which were reserved. Here it touched the fixture and the test file but not some
+    third reserved path."""
+    c = _git(monkeypatch, staged="src/flask/config.py\ntests/static/config.toml\ntests/test_config.py\n")
+    c.reserved_paths = ["tests/static/config.toml", "tests/test_config.py", "tests/unrelated.py"]
+    c.model_patch()
+    assert c.reserved_collisions == ["tests/static/config.toml", "tests/test_config.py"]
+
+
+def test_no_collision_leaves_an_empty_record(monkeypatch):
+    c = _git(monkeypatch, staged="src/flask/config.py\n")
+    c.reserved_paths = ["tests/static/config.toml"]
+    c.model_patch()
+    assert c.reserved_collisions == []
+
+
+def test_reserved_and_preexisting_are_excluded_together(monkeypatch):
+    """D20 and D21 compose: one reset call covering both, no duplicates."""
+    c = _git(monkeypatch, status="?? build/\n", staged="build/x\ntests/t.py\n")
+    c.snapshot_start_state()
+    c.reserved_paths = ["tests/t.py", "build/"]
+    c.cmds.clear()
+    c.model_patch()
+    assert c.cmds[2] == "git reset -q -- build/ tests/t.py"
+
+
+def test_no_reserved_paths_means_no_extra_git_call(monkeypatch):
+    """An instance whose test patch is unknown (or empty) must run the D20 sequence
+    exactly - no --name-only probe."""
+    c = _git(monkeypatch)
+    c.snapshot_start_state()
+    c.cmds.clear()
+    c.model_patch()
+    assert c.cmds == ["git add -A", "git diff --cached --no-color"]
+
+
+def test_agent_write_set_still_lists_collisions(monkeypatch):
+    """The agent *did* write the fixture. dirty_paths is a record of behaviour and
+    keeps it; only the submitted patch drops it."""
+    c = _git(monkeypatch, status=" M src/flask/config.py\n?? tests/static/config.toml\n")
+    c.reserved_paths = ["tests/static/config.toml"]
+    assert c.agent_dirty_paths() == ["src/flask/config.py", "tests/static/config.toml"]
 
 
 def test_sentinel_absent_leaves_output_alone():

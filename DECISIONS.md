@@ -689,3 +689,67 @@ identical across independent trajectories with different patches (`sphinx-8435`,
 265 tests pass, nine new: the snapshot, the unstage sequence, the clean-image
 no-op, path quoting, the write-set subtraction, D19 pinning of the snapshot, the
 size refusal, a calibration guard on the limit, and the end-to-end classification.
+
+---
+
+## D21 — Agent-created files collided with the hidden test patch (2026-09-16)
+
+`pallets__flask-4992` failed all four times it was drawn (both arms, seeds 20260812
+and 20260813) as `applied-broke-P2P` / `applied-F2P-unfixed`; `sphinx-doc__sphinx-8595`
+failed both times (seed 20260812) the same way. Every one of the six evaluation logs
+contains the same line, which nothing downstream reads:
+
+    error: tests/static/config.toml: already exists in working directory
+
+**Cause.** The harness grades a trajectory by applying the agent's patch, running
+`git checkout <base> -- <existing test files>`, then `git apply` of the instance's
+hidden test patch, then pytest. The `flask-4992` test patch *creates*
+`tests/static/config.toml` as a fixture. The agent, writing a test for its own change,
+had created a fixture at exactly that path, and it went into the model patch as a new
+file. `git apply` refuses to create a file that exists, and it is all-or-nothing, so the
+edit to `tests/test_config.py` was dropped along with it. Pytest ran the *old* test
+file: 18 passed, none of them the tests the report was looking for, so every hidden test
+was scored as failed. The agent's fix was never exercised. `sphinx-8595` is the same
+mechanism at `tests/roots/test-ext-autodoc/target/empty_all.py`.
+
+The `git checkout` step does not help: it restores only files that exist at the base
+commit, and a fixture the PR introduced does not.
+
+This is a harness defect scored as a model failure, the third in the D19–D21 series.
+The agent's behaviour was correct engineering; there was no way for it to know the path
+was reserved.
+
+**Decision.** The instance's `test_patch` is known at solve time (it is a column on the
+dataset row), so `run.py` now passes `paths_in_patch(inst["test_patch"])` — every
+`diff --git a/X b/X` header, both sides — into `InstanceContainer.reserved_paths`.
+`model_patch()` records which of those the agent actually staged
+(`reserved_collisions`, via `git diff --cached --name-only`, taken *before* anything is
+unstaged so it reflects behaviour), then unstages them in the same `git reset --` call
+D20 uses for the pre-existing set. The trajectory stores `reserved_collisions`;
+`dirty_paths` keeps the colliding paths because the agent did write them.
+
+Existing test files are excluded as well as new ones. The harness discards agent edits
+to those anyway via the checkout step, so nothing the evaluation sees changes; the
+submitted patch is simply the part of the agent's work that can be graded.
+
+**Why not tell the agent instead.** Adding "do not write to these paths" to the prompt
+would leak the test patch's file list, which for many instances names the test that
+will be run. It would also change the condition relative to the 21 Aug runs. The
+extraction-side fix changes nothing the agent sees.
+
+**Consequence for the scale-run numbers.** None to the comparison — all six
+trajectories are concordant. Two instances, six trajectories, are recoverable by
+re-running extraction... except that the containers are gone, so recovery means
+re-solving. In `flask-4992` all 18 visible tests passed in every trajectory and the
+source change is a two-line `text=True` branch; those four are likely resolves. The
+handoff's n=80 "environment-excluded" baseline did not know about this class, so its
+Arm 0 figure of 68.8% is itself slightly low.
+
+**Pro.** Test patches on SWE-bench Pro are larger and add more fixture files, so the
+chance an agent chooses a reserved path rises. This is the one D19–D21 fix that gets
+*more* important with the migration.
+
+Classifier fingerprint unchanged at `c0b87151304a`. 274 tests pass, nine new: the
+header parser (plain, rename, empty), the unstage sequence, collision recording (real
+ones only, none), D20+D21 composing into one reset, the no-reserved no-op, and the
+write set retaining what the agent wrote.

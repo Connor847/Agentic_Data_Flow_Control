@@ -13,6 +13,13 @@ Two things this module has to get right that are easy to get wrong:
 * **Repo state must be pristine at trajectory start.** SWE-bench images ship the repo
   at the base commit, but the eval harness also writes into `/testbed`. The container
   is created fresh per instance and destroyed after, so no state leaks between runs.
+* **The hidden test patch owns some paths (D21).** The harness grades by applying the
+  instance's test patch on top of the agent's. `git apply` is all-or-nothing and refuses
+  to create a file that already exists, so an agent that wrote its own fixture at the
+  same path the real PR chose (`flask-4992`: `tests/static/config.toml`) silently
+  prevented every hidden test from being installed, and was scored as if it had failed
+  them all. Paths the test patch touches are parsed up front and dropped from the
+  submitted patch; the harness overwrites them anyway.
 * **The image's tree is not always clean (D20).** Some images ship with untracked
   build output (`psf__requests-863`: a `build/` directory left by the package install,
   absent from that snapshot's `.gitignore`). `git add -A` at extraction swept it into
@@ -24,6 +31,7 @@ Two things this module has to get right that are easy to get wrong:
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import subprocess
 import time
@@ -48,6 +56,24 @@ DEFAULT_PLATFORM = "linux/amd64"
 #: refusing it surfaces as `harness-error`, which is honest - it is visible and can be
 #: re-run - where a silently submitted junk patch is not.
 MAX_PATCH_BYTES = 250_000
+
+
+_DIFF_HEADER = re.compile(r"^diff --git a/(.+?) b/(.+?)$", re.M)
+
+
+def paths_in_patch(patch: str) -> list[str]:
+    """Every path a unified diff touches, in order, deduplicated (D21).
+
+    Reads the `diff --git a/X b/X` headers only, which is how the harness's own
+    `git apply` decides what it is about to write. Both sides are taken so a rename
+    reserves its old and new names.
+    """
+    out: list[str] = []
+    for a, b in _DIFF_HEADER.findall(patch or ""):
+        for path in (a, b):
+            if path not in out:
+                out.append(path)
+    return out
 
 
 class DockerError(RuntimeError):
@@ -109,6 +135,14 @@ class InstanceContainer:
     #: anything. `git status --porcelain` entries, so an untracked directory appears
     #: once as `build/`. Subtracted from the patch and the write set.
     preexisting_dirty: list[str] = field(default_factory=list)
+    #: D21 - paths the instance's hidden test patch will create or overwrite. The
+    #: harness checks existing ones out from base and `git apply`s the rest, so any
+    #: agent change to them is either discarded or breaks the apply. Excluded from the
+    #: submitted patch; set from `paths_in_patch(instance["test_patch"])`.
+    reserved_paths: list[str] = field(default_factory=list)
+    #: D21 - filled by `model_patch()`: reserved paths the agent actually wrote to.
+    #: Empty in the common case; when not, the exclusion changed the patch.
+    reserved_collisions: list[str] = field(default_factory=list)
 
     def __post_init__(self):
         if not self.image:
@@ -239,6 +273,11 @@ class InstanceContainer:
         false when the image ships a dirty tree (D20). Paths recorded by
         `snapshot_start_state()` are unstaged again before the diff is taken.
 
+        Paths owned by the hidden test patch are unstaged too (D21). The harness will
+        `git checkout` the existing ones from base and `git apply` the new ones; an
+        agent-created file at a new one makes that apply fail wholesale, and the
+        trajectory is then graded against tests that were never installed.
+
         Known limit: if the agent edits a file that was *already modified* at start,
         that file is excluded wholesale and the agent's change to it is lost from the
         patch. `preexisting_dirty` is stored on the trajectory so the case is visible
@@ -247,8 +286,19 @@ class InstanceContainer:
         add = self._repo_exec("git add -A", timeout=120)
         if add["exit_code"] != 0:
             return ""
-        if self.preexisting_dirty:
-            paths = " ".join(shlex.quote(p) for p in self.preexisting_dirty)
+        # D21: what did the agent write at a path the test patch owns? Read before
+        # anything is unstaged so the record reflects the agent's actual behaviour.
+        if self.reserved_paths:
+            reserved = set(self.reserved_paths)
+            staged = self._repo_exec("git diff --cached --name-only", timeout=120)
+            self.reserved_collisions = [
+                p.strip() for p in staged["stdout"].splitlines() if p.strip() in reserved
+            ]
+        excluded = list(self.preexisting_dirty) + [
+            p for p in self.reserved_paths if p not in self.preexisting_dirty
+        ]
+        if excluded:
+            paths = " ".join(shlex.quote(p) for p in excluded)
             self._repo_exec(f"git reset -q -- {paths}", timeout=120)
         res = self._repo_exec("git diff --cached --no-color", timeout=120)
         if res["exit_code"] != 0:

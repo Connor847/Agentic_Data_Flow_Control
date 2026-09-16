@@ -343,6 +343,8 @@ async def _solve_all(instances, arm, run_dir: Path, args) -> list[dict]:
             instance_id=iid,
             platform=args.platform,
             network_none=args.network_none,
+            # D21: the harness owns every path its test patch touches.
+            reserved_paths=container_mod.paths_in_patch(inst.get("test_patch", "")),
         )
         started = time.time()
         try:
