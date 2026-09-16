@@ -21,21 +21,25 @@ log() { printf '\n=== %s  [%s] ===\n' "$1" "$(date +%H:%M:%S)"; }
 # ---------------------------------------------------------------------------
 # Pass 1 - retry in place
 # ---------------------------------------------------------------------------
-declare -A RETRY=(
-  [dfc-arm0-s20260812]="psf__requests-863,pallets__flask-4992"
-  [dfc-arm0-s20260813]="psf__requests-863,pallets__flask-4992"
-  [dfc-arm1-s20260812]="psf__requests-863,pallets__flask-4992,sphinx-doc__sphinx-8595"
-  [dfc-arm1-s20260813]="psf__requests-863,pallets__flask-4992"
-)
-# sphinx-8595 was drawn on seed 20260812 only; arm0 of that seed is above.
-RETRY[dfc-arm0-s20260812]="${RETRY[dfc-arm0-s20260812]},sphinx-doc__sphinx-8595"
+# macOS ships bash 3.2 (no associative arrays), so a function instead of a map.
+retry_ids() {
+  case "$1" in
+    dfc-arm0-s20260812) echo "psf__requests-863,pallets__flask-4992,sphinx-doc__sphinx-8595" ;;
+    dfc-arm0-s20260813) echo "psf__requests-863,pallets__flask-4992" ;;
+    dfc-arm1-s20260812) echo "psf__requests-863,pallets__flask-4992,sphinx-doc__sphinx-8595" ;;
+    dfc-arm1-s20260813) echo "psf__requests-863,pallets__flask-4992" ;;
+    *) echo "" ;;
+  esac
+}
+# sphinx-8595 was drawn on seed 20260812 only.
 
 for rid in dfc-arm0-s20260812 dfc-arm0-s20260813 dfc-arm1-s20260812 dfc-arm1-s20260813; do
   arm=${rid#dfc-}; arm=${arm%%-*}
   seed=${rid##*-s}
-  log "RETRY ${rid}: ${RETRY[$rid]}"
+  ids=$(retry_ids "$rid")
+  log "RETRY ${rid}: ${ids}"
   python -m dfc.run solve --n 30 --arm "$arm" --seed "$seed" --max-turns "$CAP" \
-    --run-id "$rid" --retry "${RETRY[$rid]}"
+    --run-id "$rid" --retry "$ids"
 done
 
 # ---------------------------------------------------------------------------
