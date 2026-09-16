@@ -115,7 +115,9 @@ Each of these cost real time and is recorded in `DECISIONS.md`.
   apply` then refuses the whole test patch and the trajectory is graded against tests
   that were never installed (`flask-4992`, `sphinx-8595`). Paths the test patch touches
   are dropped from the submitted patch at extraction; `reserved_collisions` in
-  `trajectories.json` says when that happened (D21).
+  `trajectories.json` says when that happened (D21). New files pytest would load on
+  its own — a `conftest.py`, a root-level `test_*.py` — are dropped too and listed in
+  `scratch_excluded` (D22). Modified files are never touched by either rule.
 
 ## Tests
 

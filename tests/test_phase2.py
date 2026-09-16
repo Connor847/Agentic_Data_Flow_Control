@@ -42,6 +42,7 @@ class _CwdSpy:
         self.preexisting_dirty: list[str] = []
         self.reserved_paths: list[str] = []
         self.reserved_collisions: list[str] = []
+        self.scratch_excluded: list[str] = []
 
     exec = container.InstanceContainer.exec
     _repo_exec = container.InstanceContainer._repo_exec
@@ -76,7 +77,8 @@ def test_agent_cwd_drifts_but_patch_extraction_stays_in_the_repo(monkeypatch):
     assert c.workdir == "/tmp/rxgtest"             # tracked cwd follows it, as designed
     c.seen.clear()
     c.model_patch()
-    assert c.seen == [container.TESTBED, container.TESTBED]
+    # D20-D22 added probes; the invariant is that every one of them is pinned.
+    assert len(c.seen) >= 2 and set(c.seen) == {container.TESTBED}
 
 
 def test_housekeeping_does_not_clobber_the_agents_cwd(monkeypatch):
@@ -113,17 +115,18 @@ class _GitSpy(_CwdSpy):
     """A fake repo: `status` reports whatever `self.status` holds, `diff --cached`
     returns `self.diff`, and every git command line is recorded verbatim."""
 
-    def __init__(self, status="", diff="", staged=""):
+    def __init__(self, status="", diff="", staged="", added=""):
         super().__init__()
         self.status = status
         self.diff = diff
         self.staged = staged      # what `git diff --cached --name-only` reports
+        self.added = added        # ... and with --diff-filter=A
         self.cmds: list[str] = []
 
 
-def _git(monkeypatch, status="", diff="", staged=""):
+def _git(monkeypatch, status="", diff="", staged="", added=""):
     import subprocess
-    c = _GitSpy(status, diff, staged)
+    c = _GitSpy(status, diff, staged, added)
 
     def fake_run(args, timeout=600):
         wrapped = args[-1]
@@ -132,6 +135,8 @@ def _git(monkeypatch, status="", diff="", staged=""):
         out = ""
         if inner.startswith("git status --porcelain"):
             out = c.status
+        elif inner.startswith("git diff --cached --name-only --diff-filter=A"):
+            out = c.added
         elif inner.startswith("git diff --cached --name-only"):
             out = c.staged
         elif inner.startswith("git diff --cached"):
@@ -164,7 +169,8 @@ def test_preexisting_paths_are_unstaged_before_the_diff(monkeypatch):
     c.cmds.clear()
     patch = c.model_patch()
     assert patch.startswith("diff --git a/x")
-    assert c.cmds == ["git add -A", "git reset -q -- build/", "git diff --cached --no-color"]
+    assert c.cmds == ["git add -A", "git diff --cached --name-only --diff-filter=A",
+                      "git reset -q -- build/", "git diff --cached --no-color"]
 
 
 def test_no_snapshot_means_the_old_command_sequence(monkeypatch):
@@ -173,7 +179,8 @@ def test_no_snapshot_means_the_old_command_sequence(monkeypatch):
     c.snapshot_start_state()
     c.cmds.clear()
     c.model_patch()
-    assert c.cmds == ["git add -A", "git diff --cached --no-color"]
+    assert c.cmds == ["git add -A", "git diff --cached --name-only --diff-filter=A",
+                      "git diff --cached --no-color"]
 
 
 def test_snapshot_paths_are_quoted(monkeypatch):
@@ -181,7 +188,7 @@ def test_snapshot_paths_are_quoted(monkeypatch):
     c.snapshot_start_state()
     c.cmds.clear()
     c.model_patch()
-    assert c.cmds[1] == "git reset -q -- 'odd name/' 'a'\"'\"'b'"
+    assert c.cmds[2] == "git reset -q -- 'odd name/' 'a'\"'\"'b'"
 
 
 def test_agent_write_set_excludes_the_snapshot(monkeypatch):
@@ -288,6 +295,7 @@ def test_reserved_paths_are_unstaged_before_the_diff(monkeypatch):
     assert c.cmds == [
         "git add -A",
         "git diff --cached --name-only",
+        "git diff --cached --name-only --diff-filter=A",
         "git reset -q -- tests/static/config.toml tests/test_config.py",
         "git diff --cached --no-color",
     ]
@@ -317,17 +325,18 @@ def test_reserved_and_preexisting_are_excluded_together(monkeypatch):
     c.reserved_paths = ["tests/t.py", "build/"]
     c.cmds.clear()
     c.model_patch()
-    assert c.cmds[2] == "git reset -q -- build/ tests/t.py"
+    assert c.cmds[3] == "git reset -q -- build/ tests/t.py"
 
 
 def test_no_reserved_paths_means_no_extra_git_call(monkeypatch):
-    """An instance whose test patch is unknown (or empty) must run the D20 sequence
-    exactly - no --name-only probe."""
+    """An instance whose test patch is unknown (or empty) skips the D21 probe. The D22
+    additions probe always runs; it is one cheap read."""
     c = _git(monkeypatch)
     c.snapshot_start_state()
     c.cmds.clear()
     c.model_patch()
-    assert c.cmds == ["git add -A", "git diff --cached --no-color"]
+    assert c.cmds == ["git add -A", "git diff --cached --name-only --diff-filter=A",
+                      "git diff --cached --no-color"]
 
 
 def test_agent_write_set_still_lists_collisions(monkeypatch):
@@ -336,6 +345,68 @@ def test_agent_write_set_still_lists_collisions(monkeypatch):
     c = _git(monkeypatch, status=" M src/flask/config.py\n?? tests/static/config.toml\n")
     c.reserved_paths = ["tests/static/config.toml"]
     assert c.agent_dirty_paths() == ["src/flask/config.py", "tests/static/config.toml"]
+
+
+# --------------------------------------------------------------------------
+# D22 - new files pytest would collect must not ride along in the patch
+# --------------------------------------------------------------------------
+
+import pytest as _pytest
+
+
+@_pytest.mark.parametrize("path,expected", [
+    ("conftest.py", True),
+    ("tests/conftest.py", True),
+    ("a/b/c/conftest.py", True),
+    ("test_repro.py", True),
+    ("repro_test.py", True),
+    ("tests/test_repro.py", False),          # grader names its files; not collected
+    ("src/pkg/test_utils.py", False),        # could be a real source module
+    ("_tmp_conftest_check.py", False),       # not a pytest name
+    ("repro.py", False),
+    ("changelog/7370.bugfix.rst", False),
+    ("src/flask/config.py", False),
+])
+def test_is_collectible_scratch(path, expected):
+    assert container.is_collectible_scratch(path) is expected
+
+
+def test_collectible_new_files_are_unstaged_and_recorded(monkeypatch):
+    """A conftest.py the agent left behind is loaded by the grader's pytest session
+    and can change every result. It is not part of the fix and is dropped."""
+    c = _git(monkeypatch, added="conftest.py\ntest_repro.py\nsrc/newmod.py\n",
+             diff="diff --git a/src/x.py b/src/x.py\n+fix\n")
+    c.cmds.clear()
+    c.model_patch()
+    assert c.scratch_excluded == ["conftest.py", "test_repro.py"]
+    assert c.cmds[2] == "git reset -q -- conftest.py test_repro.py"
+
+
+def test_modified_files_are_never_scratch(monkeypatch):
+    """Only additions are candidates. A modified conftest.py is the agent changing
+    project test configuration on purpose and stays in the patch."""
+    c = _git(monkeypatch, staged="conftest.py\nsrc/x.py\n", added="")
+    c.model_patch()
+    assert c.scratch_excluded == []
+    assert not any(cmd.startswith("git reset") for cmd in c.cmds)
+
+
+def test_new_source_module_survives(monkeypatch):
+    """A fix that adds a real module must not be caught by the scratch rule."""
+    c = _git(monkeypatch, added="src/flask/toml_loader.py\n")
+    c.model_patch()
+    assert c.scratch_excluded == []
+
+
+def test_reserved_path_is_not_double_counted_as_scratch(monkeypatch):
+    """tests/conftest.py owned by the test patch is a D21 collision, not D22 scratch,
+    and appears once in the reset."""
+    c = _git(monkeypatch, staged="tests/conftest.py\n", added="tests/conftest.py\n")
+    c.reserved_paths = ["tests/conftest.py"]
+    c.model_patch()
+    assert c.reserved_collisions == ["tests/conftest.py"]
+    assert c.scratch_excluded == []
+    assert c.cmds[3] == "git reset -q -- tests/conftest.py"
 
 
 def test_sentinel_absent_leaves_output_alone():

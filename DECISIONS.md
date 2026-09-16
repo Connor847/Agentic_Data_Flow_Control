@@ -753,3 +753,52 @@ Classifier fingerprint unchanged at `c0b87151304a`. 274 tests pass, nine new: th
 header parser (plain, rename, empty), the unstage sequence, collision recording (real
 ones only, none), D20+D21 composing into one reset, the no-reserved no-op, and the
 write set retaining what the agent wrote.
+
+---
+
+## D22 — New files pytest would collect are dropped from the patch (2026-09-16)
+
+D21 removes what the grader will overwrite. This entry removes the one further class
+of agent output that can *change a grade* without being part of the fix: a new file
+that the grader's own pytest session will load on its own.
+
+**The hazard.** The grader runs `pytest -rA <named test files>` in a fresh container
+after applying the model patch. Pytest loads every `conftest.py` on the path from the
+rootdir to those files, and a bare invocation collects any `test_*.py` / `*_test.py` at
+the root. An agent that left a `conftest.py` behind — a fixture it wrote to reproduce
+the issue, say — therefore runs code inside the grading session that the real test
+suite never asked for. Nothing in the 180 scale-run trajectories happened to do this:
+27 submitted new files, of which three were root-level scratch modules
+(`_tmp_conftest_check.py`, `_issue_test_module_{1,2}.py`) whose names pytest would
+not collect. That is luck, not a property.
+
+**Decision.** After `git add -A`, `git diff --cached --name-only --diff-filter=A` lists
+the *additions* only. Any addition for which `is_collectible_scratch()` holds — a
+`conftest.py` at any depth, or a `test_*.py` / `*_test.py` at the repo root — is
+unstaged with the D20/D21 set and recorded as `scratch_excluded` on the trajectory.
+
+**What the rule deliberately does not do.**
+
+- It never touches a modified file. `--diff-filter=A` is the guarantee: a fix to an
+  existing `conftest.py` or test module stays in the patch. This is the property that
+  keeps the rule from ever dropping a real fix to existing code.
+- It does not classify directories. `tests/test_repro.py` is left in. The grader names
+  its test files explicitly, so a test module in a subdirectory is not collected, and
+  "is this directory a test directory" is exactly the layout heuristic D16 warns
+  against — `src/pkg/test_utils.py` can be a source module.
+- It does not remove non-collectible scratch (`repro.py`, changelog fragments). They
+  are inert to the grader and removing them buys nothing the paper measures.
+
+Options 3 and 4 from the discussion — exclude all new files under test-like paths, or
+exclude all new files — were rejected for the same reason: each adds a judgment that
+can silently drop a legitimate new module on Pro, and none of them changes a grade
+that this rule does not already protect.
+
+**Ordering.** Exclusion groups are unioned in order D20, D21, D22 with no duplicates,
+one `git reset --` call. A reserved path is a D21 collision, never D22 scratch.
+
+Classifier fingerprint unchanged. 289 tests pass, fifteen new: eleven parametrised
+cases for `is_collectible_scratch`, the unstage-and-record path, modifications never
+qualifying, a new source module surviving, and D21/D22 not double-counting. The D19
+cwd-pinning test now asserts that *every* housekeeping call is pinned rather than
+counting them, since D20–D22 each added a probe.

@@ -76,6 +76,25 @@ def paths_in_patch(patch: str) -> list[str]:
     return out
 
 
+_TEST_MODULE = re.compile(r"^(test_[^/]*|[^/]*_test)\.py$")
+
+
+def is_collectible_scratch(path: str) -> bool:
+    """Would pytest pick this *new* file up on its own during grading? (D22)
+
+    Two shapes qualify. A `conftest.py` at any depth is loaded for every test under
+    it, so one the agent left behind runs inside the grader's session. A test module
+    at the repo root is collected by any bare `pytest` invocation. Test modules deeper
+    in the tree are left alone: the grader names its test files explicitly, and a
+    heuristic for "is this directory a test directory" is exactly the layout guess
+    D16 warns against.
+    """
+    name = path.rsplit("/", 1)[-1]
+    if name == "conftest.py":
+        return True
+    return "/" not in path and bool(_TEST_MODULE.match(name))
+
+
 class DockerError(RuntimeError):
     pass
 
@@ -143,6 +162,10 @@ class InstanceContainer:
     #: D21 - filled by `model_patch()`: reserved paths the agent actually wrote to.
     #: Empty in the common case; when not, the exclusion changed the patch.
     reserved_collisions: list[str] = field(default_factory=list)
+    #: D22 - filled by `model_patch()`: *new* files the agent left that pytest would
+    #: collect during grading (`conftest.py` anywhere, `test_*.py` at the root).
+    #: Excluded from the submitted patch; modifications are never touched.
+    scratch_excluded: list[str] = field(default_factory=list)
 
     def __post_init__(self):
         if not self.image:
@@ -273,6 +296,10 @@ class InstanceContainer:
         false when the image ships a dirty tree (D20). Paths recorded by
         `snapshot_start_state()` are unstaged again before the diff is taken.
 
+        New files pytest would collect on its own - a `conftest.py`, a root-level test
+        module - are unstaged as well (D22). They are scratch the agent left behind
+        and would otherwise run inside the grader's session. Only additions qualify.
+
         Paths owned by the hidden test patch are unstaged too (D21). The harness will
         `git checkout` the existing ones from base and `git apply` the new ones; an
         agent-created file at a new one makes that apply fail wholesale, and the
@@ -294,9 +321,19 @@ class InstanceContainer:
             self.reserved_collisions = [
                 p.strip() for p in staged["stdout"].splitlines() if p.strip() in reserved
             ]
-        excluded = list(self.preexisting_dirty) + [
-            p for p in self.reserved_paths if p not in self.preexisting_dirty
+        # D22: new files pytest would load on its own. Only additions (--diff-filter=A)
+        # are candidates, so a modified source file can never be caught by this.
+        added = self._repo_exec("git diff --cached --name-only --diff-filter=A", timeout=120)
+        self.scratch_excluded = [
+            p.strip() for p in added["stdout"].splitlines()
+            if p.strip() and is_collectible_scratch(p.strip())
+            and p.strip() not in self.reserved_paths
         ]
+        excluded: list[str] = []
+        for group in (self.preexisting_dirty, self.reserved_paths, self.scratch_excluded):
+            for p in group:
+                if p not in excluded:
+                    excluded.append(p)
         if excluded:
             paths = " ".join(shlex.quote(p) for p in excluded)
             self._repo_exec(f"git reset -q -- {paths}", timeout=120)

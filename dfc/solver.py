@@ -161,6 +161,8 @@ class Trajectory:
     #: `model_patch`; listed here so the drop is visible. `dirty_paths` keeps them,
     #: because the agent did write them.
     reserved_collisions: list[str] = field(default_factory=list)
+    #: D22 - new files dropped because pytest would collect them during grading.
+    scratch_excluded: list[str] = field(default_factory=list)
     error: str = ""
     final_text: str = ""
     #: Last lines of CLI stderr. Kept because a session that fails to authenticate
@@ -294,6 +296,7 @@ async def solve(
         traj.dirty_paths = container.agent_dirty_paths()
         traj.model_patch = container.model_patch()
         traj.reserved_collisions = list(container.reserved_collisions)
+        traj.scratch_excluded = list(container.scratch_excluded)
     except Exception as exc:
         traj.error = (traj.error + " | " if traj.error else "") + f"patch extraction: {exc}"
 
