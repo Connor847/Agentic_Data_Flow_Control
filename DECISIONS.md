@@ -802,3 +802,32 @@ cases for `is_collectible_scratch`, the unstage-and-record path, modifications n
 qualifying, a new source module surviving, and D21/D22 not double-counting. The D19
 cwd-pinning test now asserts that *every* housekeeping call is pinned rather than
 counting them, since D20–D22 each added a probe.
+
+---
+
+## D23 — `--retry` and `--instances` on `solve` (2026-09-16)
+
+D20–D22 invalidated ten scale-run trajectories: the grader never saw a usable patch,
+so the recorded failures are not measurements. `solve` could not re-run them. Resume
+skips any instance with a record, and D19's automatic retry covers only the
+empty-patch case; these had patches, just wrong ones.
+
+**`--retry ID,ID`** discards the named instances' records in an existing run-id,
+prunes their flow-log entries (D19's `_prune_flow_log`), and — new — removes their
+`logs/run_evaluation/<run-id>/<model>/<id>/` directory, because the official harness
+skips an instance whose `report.json` exists and the retry would otherwise be graded
+by the stale report. The re-solve then proceeds under the identical seed, arm and cap.
+
+**`--instances ID,ID`** replaces the seeded sample with a hand-picked set.
+`sample.json` records `selection: explicit` and `report` prints a warning line.
+
+**The rule that goes with them.** Replacing a record is legitimate only when the
+original was not a valid measurement. Re-running a *genuine* failure and keeping the
+better result is selection on the outcome — nobody re-runs successes — and it inflates
+the resolve rate by exactly the regression-to-the-mean it invites. So: harness-defect
+trajectories are retried in place; everything else that needs a second look goes
+through `--instances` into a separate run-id, which is diagnostic and is never pooled
+with the seeded runs. `run_retry_d20-d22.sh` is the first use and follows this split.
+
+291 tests pass, two new (id parsing; the evaluation-log removal touches only the named
+instances).

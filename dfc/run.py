@@ -291,6 +291,23 @@ def _prune_flow_log(path: Path, instance_ids: set[str]) -> int:
     return dropped
 
 
+def _csv_ids(text: str | None) -> set[str]:
+    return {x.strip() for x in (text or "").split(",") if x.strip()}
+
+
+def _forget_evaluation(run_id: str, instance_ids: set[str]) -> int:
+    """Drop the official harness's per-instance log dir so `evaluate` re-grades a
+    retried trajectory instead of reusing the stale report.json (D23)."""
+    import shutil
+    dropped = 0
+    for iid in instance_ids:
+        d = Path("logs/run_evaluation") / run_id / MODEL_NAME / iid
+        if d.exists():
+            shutil.rmtree(d)
+            dropped += 1
+    return dropped
+
+
 async def _solve_all(instances, arm, run_dir: Path, args) -> list[dict]:
     # Resume: a long run will be interrupted - docker hiccup, rate limit, laptop
     # sleep - and without this a single failure at instance 200 discards 200
@@ -299,6 +316,12 @@ async def _solve_all(instances, arm, run_dir: Path, args) -> list[dict]:
     trajectories: list[dict] = []
     done: set[str] = set()
     retried: set[str] = set()
+    # D23: explicit retries. The record is discarded and the instance re-solved; the
+    # only legitimate reason is that the original was not a valid measurement (a
+    # harness defect fixed since). Re-running a genuine failure and keeping the
+    # better result is selection on the outcome - use --instances into a separate
+    # run-id for diagnosis instead.
+    forced = _csv_ids(getattr(args, "retry", None))
     existing = run_dir / "trajectories.json"
     if existing.exists():
         try:
@@ -307,6 +330,9 @@ async def _solve_all(instances, arm, run_dir: Path, args) -> list[dict]:
             prior = []
         for t in prior:
             if t.get("tool_stats", {}).get("calls", 0) <= 0:
+                continue
+            if t["instance_id"] in forced:
+                retried.add(t["instance_id"])
                 continue
             if _retryable_harness_failure(t):
                 # D19: commands ran, the trajectory ended cleanly, and no diff came
@@ -320,15 +346,24 @@ async def _solve_all(instances, arm, run_dir: Path, args) -> list[dict]:
         if done or retried:
             print(f"resuming  : {len(done)} trajectory(ies) already complete, "
                   f"{len(instances) - len(done)} to go")
-            if retried:
-                print(f"retrying  : {len(retried)} with an empty patch after a clean "
-                      f"finish (D19): {', '.join(sorted(retried))}")
+            if retried - forced:
+                print(f"retrying  : {len(retried - forced)} with an empty patch after a "
+                      f"clean finish (D19): {', '.join(sorted(retried - forced))}")
+            if retried & forced:
+                print(f"retrying  : {len(retried & forced)} by --retry (D23): "
+                      f"{', '.join(sorted(retried & forced))}")
             print()
         # Keep the flow log consistent with trajectories.json: a retried instance
         # would otherwise contribute two sets of records and inflate the coverage
-        # denominator it feeds.
+        # denominator it feeds. The harness's own log dir goes too, or `evaluate`
+        # silently keeps the old report.
         if retried:
             _prune_flow_log(run_dir / "flow_log.jsonl", retried)
+            _forget_evaluation(run_dir.name, retried)
+    missing = forced - {i["instance_id"] for i in instances}
+    if missing:
+        print(f"warning   : --retry names instances not in this sample, ignored: "
+              f"{', '.join(sorted(missing))}")
 
     dead = 0
     for i, inst in enumerate(instances, 1):
@@ -419,13 +454,26 @@ def cmd_solve(args) -> int:
     run_dir = RUNS_DIR / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    instances, sizes = sample.pick(args.n, args.dataset, args.split, args.seed)
+    explicit = _csv_ids(getattr(args, "instances", None))
+    if explicit:
+        # D23: a hand-picked set for diagnosis. Not a sample - never pool it with the
+        # seeded runs. `report` carries the flag so it cannot be mistaken for one.
+        pool = {i["instance_id"]: i for i in sample.load(args.dataset, args.split)}
+        unknown = sorted(explicit - set(pool))
+        if unknown:
+            print(f"unknown instance id(s): {', '.join(unknown)}", file=sys.stderr)
+            return 2
+        instances = [pool[i] for i in sorted(explicit)]
+        sizes = sample.size_report(instances)
+    else:
+        instances, sizes = sample.pick(args.n, args.dataset, args.split, args.seed)
     meta = {
         "run_id": run_id, "arm": arm.name, "model": solver.MODEL,
         "dataset": args.dataset, "split": args.split, "seed": args.seed,
         "max_turns": args.max_turns,
         "instance_ids": [i["instance_id"] for i in instances],
         "gold_patch_sizes": sizes,
+        "selection": "explicit" if explicit else "stratified",
         **version.version_block(),
     }
     (run_dir / "sample.json").write_text(json.dumps(meta, indent=2))
@@ -583,6 +631,12 @@ def cmd_report(args) -> int:
              if capped else ""))
     ok, why = version.comparable(*fps)
     print(f"classifier      : {', '.join(sorted(f for f in fps if f)) or 'unstamped'}")
+    sample_meta = run_dir / "sample.json"
+    if sample_meta.exists():
+        sel = json.loads(sample_meta.read_text()).get("selection", "stratified")
+        if sel == "explicit":
+            print("selection       : explicit   ! diagnostic set, not a sample - "
+                  "do not pool with seeded runs (D23)")
     if not ok:
         print(f"  ! {why}")
     print(f"empty dfc_observed cells: {empty_observed}  "
@@ -831,6 +885,13 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--split", default=sample.SPLIT)
     s.add_argument("--seed", type=int, default=sample.SEED)
     s.add_argument("--max-turns", type=int, default=solver.DEFAULT_MAX_TURNS)
+    s.add_argument("--retry", default=None, metavar="ID,ID",
+                   help="D23: discard these instances' records in an existing run-id "
+                        "and re-solve them; only for trajectories invalidated by a "
+                        "harness fix")
+    s.add_argument("--instances", default=None, metavar="ID,ID",
+                   help="D23: solve exactly these instances instead of a seeded "
+                        "sample; a diagnostic set, never pooled with seeded runs")
     s.add_argument("--command-timeout", type=int, default=300)
     s.add_argument("--platform", default=container_mod.DEFAULT_PLATFORM)
     s.add_argument("--hints", action="store_true",

@@ -409,6 +409,32 @@ def test_reserved_path_is_not_double_counted_as_scratch(monkeypatch):
     assert c.cmds[3] == "git reset -q -- tests/conftest.py"
 
 
+# --------------------------------------------------------------------------
+# D23 - explicit retry and explicit instance selection
+# --------------------------------------------------------------------------
+
+def test_csv_ids_parses_and_ignores_blanks():
+    from dfc.run import _csv_ids
+    assert _csv_ids("a, b,,c ") == {"a", "b", "c"}
+    assert _csv_ids(None) == set()
+    assert _csv_ids("") == set()
+
+
+def test_forget_evaluation_removes_only_named_dirs(tmp_path, monkeypatch):
+    """A retried instance must lose its harness log dir, or `evaluate` reuses the
+    stale report.json and the retry silently changes nothing."""
+    from dfc import run as run_mod
+    monkeypatch.chdir(tmp_path)
+    base = tmp_path / "logs" / "run_evaluation" / "rid" / run_mod.MODEL_NAME
+    for iid in ("a__1", "b__2", "c__3"):
+        (base / iid).mkdir(parents=True)
+        (base / iid / "report.json").write_text("{}")
+    assert run_mod._forget_evaluation("rid", {"a__1", "c__3", "missing__9"}) == 2
+    assert not (base / "a__1").exists()
+    assert (base / "b__2" / "report.json").exists()
+    assert not (base / "c__3").exists()
+
+
 def test_sentinel_absent_leaves_output_alone():
     from dfc.container import _split_sentinel
     text, cwd = _split_sentinel("just output", "__DFC_CWD__")
