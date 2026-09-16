@@ -106,6 +106,11 @@ Each of these cost real time and is recorded in `DECISIONS.md`.
   `dfc.run inspect --failures`, which flags this.
 - **`docker exec` is stateless.** Working directory is tracked and re-injected per call;
   exported variables and background jobs do not survive between commands.
+- **Some images ship a dirty tree.** `psf__requests-863` comes up with an untracked
+  `build/` from its own package install; `git add -A` at extraction turned it into an
+  873 KB patch four times running. The write set is now snapshotted at container start
+  and subtracted, and a patch over 250 KB is refused as a harness error (D20). Check
+  `preexisting_dirty` in `trajectories.json` if a patch looks wrong.
 
 ## Tests
 

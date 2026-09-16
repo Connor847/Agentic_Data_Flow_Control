@@ -153,6 +153,10 @@ class Trajectory:
     usage: dict = field(default_factory=dict)
     tool_stats: dict = field(default_factory=dict)
     dirty_paths: list[str] = field(default_factory=list)
+    #: D20 - what was already dirty in the image before the agent's first command.
+    #: Excluded from `dirty_paths` and from `model_patch`; recorded so the exclusion
+    #: is auditable per trajectory rather than invisible.
+    preexisting_dirty: list[str] = field(default_factory=list)
     error: str = ""
     final_text: str = ""
     #: Last lines of CLI stderr. Kept because a session that fails to authenticate
@@ -282,7 +286,8 @@ async def solve(
 
     # §8 R5 - the patch comes from git, never from the model.
     try:
-        traj.dirty_paths = container.dirty_paths()
+        traj.preexisting_dirty = list(container.preexisting_dirty)
+        traj.dirty_paths = container.agent_dirty_paths()
         traj.model_patch = container.model_patch()
     except Exception as exc:
         traj.error = (traj.error + " | " if traj.error else "") + f"patch extraction: {exc}"

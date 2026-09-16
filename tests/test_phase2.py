@@ -39,11 +39,14 @@ class _CwdSpy:
         self.workdir = container.TESTBED
         self.drift = drift
         self.seen: list[str] = []
+        self.preexisting_dirty: list[str] = []
 
     exec = container.InstanceContainer.exec
     _repo_exec = container.InstanceContainer._repo_exec
     model_patch = container.InstanceContainer.model_patch
     dirty_paths = container.InstanceContainer.dirty_paths
+    agent_dirty_paths = container.InstanceContainer.agent_dirty_paths
+    snapshot_start_state = container.InstanceContainer.snapshot_start_state
     reset = container.InstanceContainer.reset
 
 
@@ -98,6 +101,132 @@ def test_explicit_workdir_overrides_tracked_cwd(monkeypatch):
     c.exec("ls", workdir="/somewhere", track_cwd=False)
     assert c.seen == ["/somewhere"]
     assert c.workdir == "/tmp/rxgtest"
+
+
+# --------------------------------------------------------------------------
+# D20 - pre-existing image state must not be swept into the patch
+# --------------------------------------------------------------------------
+
+class _GitSpy(_CwdSpy):
+    """A fake repo: `status` reports whatever `self.status` holds, `diff --cached`
+    returns `self.diff`, and every git command line is recorded verbatim."""
+
+    def __init__(self, status="", diff=""):
+        super().__init__()
+        self.status = status
+        self.diff = diff
+        self.cmds: list[str] = []
+
+
+def _git(monkeypatch, status="", diff=""):
+    import subprocess
+    c = _GitSpy(status, diff)
+
+    def fake_run(args, timeout=600):
+        wrapped = args[-1]
+        inner = wrapped.split("; { ", 1)[1].split("\n}; __rc", 1)[0]
+        c.cmds.append(inner)
+        out = ""
+        if inner.startswith("git status --porcelain"):
+            out = c.status
+        elif inner.startswith("git diff --cached"):
+            out = c.diff
+        return subprocess.CompletedProcess(
+            args, 0, stdout=f"{out}\n__DFC_CWD__{container.TESTBED}\n", stderr="")
+
+    monkeypatch.setattr(container, "_run", fake_run)
+    return c
+
+
+REQUESTS_863 = " M requests/models.py\n?? build/\n"
+
+
+def test_start_state_snapshot_records_what_the_image_shipped_dirty(monkeypatch):
+    """psf__requests-863 came up with an untracked build/ from the image's own package
+    install. That is not the agent's work and must be known before it runs anything."""
+    c = _git(monkeypatch, status="?? build/\n")
+    assert c.snapshot_start_state() == ["build/"]
+    assert c.preexisting_dirty == ["build/"]
+
+
+def test_preexisting_paths_are_unstaged_before_the_diff(monkeypatch):
+    """The bug: `git add -A` staged build/ (69 files, 873 KB) and the harness scored
+    the trajectory as an error four times out of four. The fix is not to stop using
+    `-A` - plain `git diff` misses files the agent created - but to unstage the
+    snapshot again before taking the diff."""
+    c = _git(monkeypatch, status="?? build/\n", diff="diff --git a/x b/x\n+fix\n")
+    c.snapshot_start_state()
+    c.cmds.clear()
+    patch = c.model_patch()
+    assert patch.startswith("diff --git a/x")
+    assert c.cmds == ["git add -A", "git reset -q -- build/", "git diff --cached --no-color"]
+
+
+def test_no_snapshot_means_the_old_command_sequence(monkeypatch):
+    """A clean image must not pay for the fix: no reset call, nothing else changes."""
+    c = _git(monkeypatch, status="", diff="")
+    c.snapshot_start_state()
+    c.cmds.clear()
+    c.model_patch()
+    assert c.cmds == ["git add -A", "git diff --cached --no-color"]
+
+
+def test_snapshot_paths_are_quoted(monkeypatch):
+    c = _git(monkeypatch, status="?? odd name/\n?? a'b\n")
+    c.snapshot_start_state()
+    c.cmds.clear()
+    c.model_patch()
+    assert c.cmds[1] == "git reset -q -- 'odd name/' 'a'\"'\"'b'"
+
+
+def test_agent_write_set_excludes_the_snapshot(monkeypatch):
+    """The trajectory's dirty_paths should name what the agent changed, not what the
+    image shipped. requests-863 recorded ['requests/models.py', 'build/']; only the
+    first is attributable."""
+    c = _git(monkeypatch, status="?? build/\n")
+    c.snapshot_start_state()
+    c.status = REQUESTS_863
+    assert c.dirty_paths() == ["requests/models.py", "build/"]
+    assert c.agent_dirty_paths() == ["requests/models.py"]
+
+
+def test_snapshot_happens_in_the_repo_not_the_tracked_cwd(monkeypatch):
+    """D19 applies to the snapshot too: it must be pinned to /testbed."""
+    c = _spy(monkeypatch)
+    c.exec("cd /tmp/rxgtest && ls")
+    c.seen.clear()
+    c.snapshot_start_state()
+    assert c.seen == [container.TESTBED]
+    assert c.workdir == "/tmp/rxgtest"
+
+
+def test_oversized_patch_is_refused_not_submitted(monkeypatch):
+    """A 873 KB patch is not a model output; it is our extraction failing. Raising makes
+    the solver record it as a harness error (visible, retryable) rather than shipping
+    it to the harness (which fails opaquely) or returning "" (scored as empty patch)."""
+    import pytest
+    big = "diff --git a/build/1 b/build/1\n" + "+x\n" * (container.MAX_PATCH_BYTES // 3 + 1)
+    c = _git(monkeypatch, status="", diff=big)
+    with pytest.raises(container.PatchTooLarge) as ei:
+        c.model_patch()
+    assert "over the" in str(ei.value)
+    assert container.PatchTooLarge.__mro__[1] is container.DockerError
+
+
+def test_patch_limit_clears_every_real_scale_run_patch():
+    """Calibration guard: the largest legitimate patch in the 21 Aug run was 41,590
+    bytes (mwaskom__seaborn-3190). The limit must sit well above it and well below the
+    873,799-byte requests-863 sweep, or it is tuned to the wrong thing."""
+    assert 41_590 * 2 < container.MAX_PATCH_BYTES < 873_794 // 2
+
+
+def test_solver_classifies_a_refused_patch_as_harness_error():
+    """End to end through classify_failure: a PatchTooLarge lands in `error`, and
+    `error` wins over everything else (D19 ordering)."""
+    from dfc.run import classify_failure
+    traj = {"error": "patch extraction: PatchTooLarge: 873799 bytes", "model_patch": "",
+            "stop_reason": "success", "tool_stats": {"calls": 9}}
+    assert classify_failure(traj, None, 0.0, False) == "harness-error"
 
 
 def test_sentinel_absent_leaves_output_alone():

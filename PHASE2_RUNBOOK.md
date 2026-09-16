@@ -265,3 +265,5 @@ Roughly 180 trajectories (2 arms × 3 seeds × n=30). Notes:
 - One classifier fingerprint across every run being compared
 - `dfc_observed` non-empty in every row
 - Denial attribution naming real culprits, not `cd`
+- No `harness-error` rows caused by `PatchTooLarge`, and no path appearing in both
+  `preexisting_dirty` and the agent's write set (D20)

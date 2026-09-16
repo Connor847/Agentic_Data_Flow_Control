@@ -13,6 +13,12 @@ Two things this module has to get right that are easy to get wrong:
 * **Repo state must be pristine at trajectory start.** SWE-bench images ship the repo
   at the base commit, but the eval harness also writes into `/testbed`. The container
   is created fresh per instance and destroyed after, so no state leaks between runs.
+* **The image's tree is not always clean (D20).** Some images ship with untracked
+  build output (`psf__requests-863`: a `build/` directory left by the package install,
+  absent from that snapshot's `.gitignore`). `git add -A` at extraction swept it into
+  an 873 KB, 69-file "patch" the harness could not apply, four times out of four. The
+  write set is therefore snapshotted at container start and subtracted at extraction,
+  and a patch above `MAX_PATCH_BYTES` is refused rather than submitted.
 """
 
 from __future__ import annotations
@@ -35,8 +41,23 @@ IMAGE_FMT = "swebench/sweb.eval.x86_64.{key}:latest"
 DEFAULT_PLATFORM = "linux/amd64"
 
 
+#: D20 - refuse to submit a patch larger than this. Calibrated on the 21 Aug scale
+#: run: 176 of 180 trajectories were under 42 KB (median 1.9 KB, p90 4.1 KB, max
+#: 41.6 KB); the four above it were all 873 KB and all pre-existing image state. A
+#: patch in between is possible but would be a very unusual SWE-bench Lite fix, and
+#: refusing it surfaces as `harness-error`, which is honest - it is visible and can be
+#: re-run - where a silently submitted junk patch is not.
+MAX_PATCH_BYTES = 250_000
+
+
 class DockerError(RuntimeError):
     pass
+
+
+class PatchTooLarge(DockerError):
+    """The extracted diff exceeds `MAX_PATCH_BYTES`. Raised rather than returned so the
+    solver records it as a harness error instead of an empty patch (D19 made that
+    distinction for the empty case; this is the oversized case)."""
 
 
 def _run(args: list[str], timeout: int = 600) -> subprocess.CompletedProcess:
@@ -84,6 +105,10 @@ class InstanceContainer:
     cpus: str = "2"
     pids_limit: int = 512
     started: float = field(default_factory=time.time)
+    #: D20 - paths already dirty when the container came up, before the agent ran
+    #: anything. `git status --porcelain` entries, so an untracked directory appears
+    #: once as `build/`. Subtracted from the patch and the write set.
+    preexisting_dirty: list[str] = field(default_factory=list)
 
     def __post_init__(self):
         if not self.image:
@@ -119,7 +144,15 @@ class InstanceContainer:
             raise DockerError(f"could not start container for {self.instance_id}:\n{p.stderr.strip()}")
         self.container_id = p.stdout.strip()
         self.workdir = TESTBED
+        self.snapshot_start_state()
         return self
+
+    def snapshot_start_state(self) -> list[str]:
+        """D20: record what is already dirty before the agent's first command, so it
+        can be told apart from the agent's work at extraction. Called by `start()`;
+        exposed so a caller that constructs the container differently can still do it."""
+        self.preexisting_dirty = self.dirty_paths()
+        return self.preexisting_dirty
 
     def _image_present(self) -> bool:
         p = _run(["docker", "image", "inspect", self.image], timeout=60)
@@ -199,21 +232,52 @@ class InstanceContainer:
     def model_patch(self) -> str:
         """§8 R5: the patch is produced by `git diff` at the end of the trajectory, not
         by the model emitting diff text. This is what killed the previous run - invented
-        paths and fabricated blob hashes cannot happen when the diff comes from git."""
+        paths and fabricated blob hashes cannot happen when the diff comes from git.
+
+        `git add -A` is still needed - plain `git diff` misses files the agent created -
+        but its buried assumption, that everything untracked is the agent's work, is
+        false when the image ships a dirty tree (D20). Paths recorded by
+        `snapshot_start_state()` are unstaged again before the diff is taken.
+
+        Known limit: if the agent edits a file that was *already modified* at start,
+        that file is excluded wholesale and the agent's change to it is lost from the
+        patch. `preexisting_dirty` is stored on the trajectory so the case is visible
+        and can be checked against the flow log's write set.
+        """
         add = self._repo_exec("git add -A", timeout=120)
         if add["exit_code"] != 0:
             return ""
+        if self.preexisting_dirty:
+            paths = " ".join(shlex.quote(p) for p in self.preexisting_dirty)
+            self._repo_exec(f"git reset -q -- {paths}", timeout=120)
         res = self._repo_exec("git diff --cached --no-color", timeout=120)
-        return res["stdout"] if res["exit_code"] == 0 else ""
+        if res["exit_code"] != 0:
+            return ""
+        patch = res["stdout"]
+        if len(patch) > MAX_PATCH_BYTES:
+            headers = patch.count("\ndiff --git ") + patch.startswith("diff --git ")
+            raise PatchTooLarge(
+                f"extracted patch is {len(patch)} bytes across {headers} files, over "
+                f"the {MAX_PATCH_BYTES}-byte limit; pre-existing dirty paths were "
+                f"{self.preexisting_dirty or 'none'}"
+            )
+        return patch
 
     def dirty_paths(self) -> list[str]:
-        """Write set, cheaply. §6.4 prefers this over `docker diff` for a repo."""
+        """Write set as git sees it, including anything dirty before the agent ran.
+        §6.4 prefers this over `docker diff` for a repo."""
         res = self._repo_exec("git status --porcelain", timeout=120)
         out = []
         for line in res["stdout"].splitlines():
             if len(line) > 3:
                 out.append(line[3:].strip())
         return out
+
+    def agent_dirty_paths(self) -> list[str]:
+        """The write set attributable to the agent: `dirty_paths()` minus the start-state
+        snapshot (D20). This is what belongs in the trajectory record."""
+        pre = set(self.preexisting_dirty)
+        return [p for p in self.dirty_paths() if p not in pre]
 
     def reset(self) -> None:
         self._repo_exec("git checkout -- . && git clean -fd", timeout=180)

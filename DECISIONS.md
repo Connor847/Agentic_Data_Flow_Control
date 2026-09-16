@@ -622,3 +622,70 @@ Retrying also has to prune the flow log, which is append-only. Without
 and silently inflates the coverage denominator those records feed.
 
 256 tests pass.
+
+---
+
+## D20 — `git add -A` swept pre-existing image state into the patch (2026-09-16)
+
+`psf__requests-863` harness-errored in all four trajectories that ran it (both arms,
+seeds 20260812 and 20260813): `dirty_paths: ['requests/models.py', 'build/']`, a
+**873,799-byte patch with 69 diff headers**, no report from the harness. The agent ran
+nine commands, none of which build or install, and one of them was
+`find ... | grep -v build` — it was filtering `build/` *out* of its own searches, so the
+directory was there before it started. The image's own package install created it, and
+that 2013-era snapshot's `.gitignore` does not list it.
+
+**Cause.** `model_patch()` runs `git add -A` before `git diff --cached`. The `-A` is
+necessary — plain `git diff` misses files the agent creates — but it carries the
+assumption that *everything untracked is the agent's work*, which is false when the
+image ships a dirty tree. Same shape as D19: two sound decisions (§8 R5's "the patch
+comes from git" and the need to capture new files) with nothing connecting them to the
+state of the image.
+
+For calibration, across the other 176 scale-run trajectories the patch median is
+1,903 B, p90 4,119 B, max 41,590 B (`mwaskom__seaborn-3190`). The only four above
+that are this instance.
+
+**Decision.** Three parts, all in `container.py` and `solver.py`, so the classifier
+fingerprint is unchanged at `c0b87151304a` and every existing run stays comparable.
+
+1. **Snapshot at start.** `start()` now calls `snapshot_start_state()`, which records
+   `git status --porcelain` before the agent's first command into
+   `preexisting_dirty`. Pinned to `/testbed` via `_repo_exec()` per D19.
+2. **Subtract at extraction.** `model_patch()` still runs `git add -A`, then
+   `git reset -q -- <snapshot paths>` before `git diff --cached`. A clean image issues
+   exactly the old two commands. The trajectory's `dirty_paths` becomes
+   `agent_dirty_paths()` — the write set minus the snapshot — and the snapshot itself
+   is stored as `preexisting_dirty` so the exclusion is auditable per trajectory.
+3. **Size guard.** A diff over `MAX_PATCH_BYTES` (250 KB: six times the largest real
+   patch, a quarter of the sweep) raises `PatchTooLarge`. The solver's existing
+   `except` around extraction turns that into `error`, and `classify_failure` scores
+   `error` as `harness-error` before anything else. Raising was chosen over returning
+   `""` because D19 already established that an empty patch after a clean finish must
+   not masquerade as a model result; an oversized one is the same failure from the
+   other side.
+
+**Known limit, stated rather than hidden.** If the agent edits a file that was already
+*modified* (not merely untracked) at start, `git reset -- path` unstages the whole file
+and the agent's change to it is lost from the patch. The alternative — committing the
+start state so the diff is taken against it — would change what the agent sees in
+`git log`/`git status` and so alter the condition relative to the 21 Aug runs. Since
+`preexisting_dirty` is recorded, the case is detectable after the fact: any path in
+both `preexisting_dirty` and the flow log's write set needs a manual look.
+
+**Consequence for the scale-run numbers.** None to the comparison: `requests-863`
+failed in both arms on both seeds, so it is concordant and the discordant counts
+(7 / 3) do not move. It costs two usable pairs. The honest Arm 0 baseline excluding it
+and the five environment-dependent instances the handoff identifies is 68.8% (n=80)
+rather than 61.1% (n=90); the CI on the paired difference widens slightly to
+[−2.7, +12.7].
+
+**Not done here, deliberately.** The handoff's second proposal — an
+`environment-suspect` failure class for instances whose PASS_TO_PASS failure set is
+identical across independent trajectories with different patches (`sphinx-8435`,
+`sphinx-8627`, the three `httpbin.org` `requests` instances) — is a separate change to
+`classify_failure` in `run.py` and gets its own entry when built.
+
+265 tests pass, nine new: the snapshot, the unstage sequence, the clean-image
+no-op, path quoting, the write-set subtraction, D19 pinning of the snapshot, the
+size refusal, a calibration guard on the limit, and the end-to-end classification.
