@@ -40,6 +40,7 @@ TAXONOMY = [
     "empty-patch-after-success",  # D19: trajectory ended cleanly but no diff came back
     "patch-malformed",        # harness could not apply the diff
     "applied-broke-P2P",      # applied, but previously-passing tests now fail
+    "environment-suspect",    # D25: the P2P tests that failed also fail with NO patch
     "applied-F2P-unfixed",    # applied cleanly, target tests still fail
     "harness-error",          # our bug, not the model's
     "turn-limit",             # ran out of turns
@@ -49,8 +50,65 @@ TAXONOMY = [
 ]
 
 
+# --------------------------------------------------------------------------
+# D25 - environment baseline: which tests fail on the pristine container?
+# --------------------------------------------------------------------------
+
+#: The harness run-id that holds no-patch evaluations. One per instance, reused.
+ENVCHECK_RUN_ID = "dfc-envcheck"
+ENVCHECK_DIR = RUNS_DIR / "envcheck"
+
+#: The official harness skips an empty model_patch, so the "no patch" condition is
+#: expressed as a patch that creates one inert file. It touches nothing the tests
+#: import and nothing a test patch could collide with.
+NOOP_PATCH = (
+    "diff --git a/dfc_envcheck.txt b/dfc_envcheck.txt\n"
+    "new file mode 100644\n"
+    "index 0000000..e69de29\n"
+    "--- /dev/null\n"
+    "+++ b/dfc_envcheck.txt\n"
+    "@@ -0,0 +1 @@\n"
+    "+dfc environment baseline: no model patch applied\n"
+)
+
+
+def load_baseline() -> dict:
+    """{instance_id: {"p2p_failures": [...], "f2p_failures": [...]}} or {}."""
+    path = ENVCHECK_DIR / "baseline.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return {}
+
+
+def merge_baseline(existing: dict, instance_id: str, report: dict) -> dict:
+    """Union a fresh no-patch report into the baseline. Union, not replace, because an
+    environment that fails intermittently (live-service tests) is still an
+    environment failure; every test ever seen failing without a patch counts."""
+    tests = report.get("tests_status", {}) or {}
+    cur = existing.get(instance_id, {"p2p_failures": [], "f2p_failures": [], "runs": 0})
+    cur["p2p_failures"] = sorted(set(cur["p2p_failures"])
+                                 | set(tests.get("PASS_TO_PASS", {}).get("failure", [])))
+    cur["f2p_failures"] = sorted(set(cur["f2p_failures"])
+                                 | set(tests.get("FAIL_TO_PASS", {}).get("failure", [])))
+    cur["runs"] = cur.get("runs", 0) + 1
+    existing[instance_id] = cur
+    return existing
+
+
+def environment_explains(instance_id: str, p2p_failing: list[str], baseline: dict) -> bool:
+    """True when every PASS_TO_PASS failure in this report also failed on the pristine
+    container. A patch cannot have caused a failure that happens without it."""
+    base = baseline.get(instance_id)
+    if not base or not p2p_failing:
+        return False
+    return set(p2p_failing) <= set(base.get("p2p_failures", []))
+
+
 def classify_failure(traj: dict, report: dict | None, denial_rate: float,
-                     fidelity_hit: bool) -> str:
+                     fidelity_hit: bool, baseline: dict | None = None) -> str:
     """One label per instance. §4 showed 5 instances spanning 4 categories and a CSV
     that recorded none of them."""
     if traj.get("error"):
@@ -77,6 +135,13 @@ def classify_failure(traj: dict, report: dict | None, denial_rate: float,
     p2p_failing = tests.get("PASS_TO_PASS", {}).get("failure", [])
     f2p_failing = tests.get("FAIL_TO_PASS", {}).get("failure", [])
     if p2p_failing:
+        # D25: if the same P2P tests fail with no patch at all, the patch did not
+        # break them. Checked first - an environment failure is not a rewrite issue
+        # and not a regression, whatever else the trajectory did. F2P results on such
+        # an instance are untrustworthy too (the same broken service or dependency
+        # sits under them), so the whole row is set aside rather than scored.
+        if environment_explains(traj.get("instance_id", ""), p2p_failing, baseline or {}):
+            return "environment-suspect"
         # §10: `patch --fuzz=5` will apply a wrong patch in the wrong place and report
         # success. Always check PASS_TO_PASS regressions, not just FAIL_TO_PASS.
         return "rewrite-infidelity" if fidelity_hit else "applied-broke-P2P"
@@ -538,6 +603,71 @@ def cmd_evaluate(args) -> int:
 
 
 # --------------------------------------------------------------------------
+# envcheck (D25)
+# --------------------------------------------------------------------------
+
+def _p2p_broken_instances(run_id: str) -> list[str]:
+    """Instances in a run whose report shows PASS_TO_PASS failures."""
+    run_dir = RUNS_DIR / run_id
+    out = []
+    for t in json.loads((run_dir / "trajectories.json").read_text()):
+        rep = _instance_report(run_id, t["instance_id"])
+        if rep and (rep.get("tests_status", {}) or {}).get("PASS_TO_PASS", {}).get("failure"):
+            out.append(t["instance_id"])
+    return sorted(set(out))
+
+
+def cmd_envcheck(args) -> int:
+    """Evaluate the named instances with NO model patch and record which tests fail
+    anyway. Costs Docker time only - no agent, no quota."""
+    run_dir = RUNS_DIR / args.run_id
+    meta = json.loads((run_dir / "sample.json").read_text())
+    ids = sorted(_csv_ids(getattr(args, "instances", None))) or _p2p_broken_instances(args.run_id)
+    if not ids:
+        print("no instances with PASS_TO_PASS failures in this run; nothing to check")
+        return 0
+    if getattr(args, "force", False):
+        _forget_evaluation(ENVCHECK_RUN_ID, set(ids))
+
+    ENVCHECK_DIR.mkdir(parents=True, exist_ok=True)
+    preds_path = ENVCHECK_DIR / "predictions.json"
+    preds = {}
+    if preds_path.exists():
+        preds = {p["instance_id"]: p for p in json.loads(preds_path.read_text())}
+    for iid in ids:
+        preds[iid] = {"instance_id": iid, "model_name_or_path": MODEL_NAME,
+                      "model_patch": NOOP_PATCH}
+    preds_path.write_text(json.dumps(list(preds.values()), indent=2))
+
+    print(f"envcheck  : {len(ids)} instance(s) with no model patch -> "
+          f"logs/run_evaluation/{ENVCHECK_RUN_ID}/")
+    cmd = [
+        sys.executable, "-m", "swebench.harness.run_evaluation",
+        "--dataset_name", meta["dataset"], "--split", meta["split"],
+        "--predictions_path", str(preds_path),
+        "--max_workers", str(args.max_workers),
+        "--run_id", ENVCHECK_RUN_ID, "--cache_level", args.cache_level,
+        "--instance_ids", *ids,
+    ]
+    print(" ".join(cmd), "\n")
+    rc = subprocess.run(cmd).returncode
+
+    baseline = load_baseline()
+    for iid in ids:
+        rep = _instance_report(ENVCHECK_RUN_ID, iid)
+        if rep is None:
+            print(f"  {iid:38s} no report (harness error?)")
+            continue
+        baseline = merge_baseline(baseline, iid, rep)
+        n = len(baseline[iid]["p2p_failures"])
+        print(f"  {iid:38s} P2P failing with no patch: {n}"
+              + ("   <- environment" if n else ""))
+    (ENVCHECK_DIR / "baseline.json").write_text(json.dumps(baseline, indent=2))
+    print(f"\nwrote {ENVCHECK_DIR / 'baseline.json'}; re-run `report` on affected run-ids")
+    return rc
+
+
+# --------------------------------------------------------------------------
 # report
 # --------------------------------------------------------------------------
 
@@ -561,6 +691,7 @@ def cmd_report(args) -> int:
     by_instance: dict[str, list[dict]] = {}
     for rec in records:
         by_instance.setdefault(rec.get("instance_id", ""), []).append(rec)
+    baseline = load_baseline()
 
     rows = []
     for traj in trajectories:
@@ -591,7 +722,8 @@ def cmd_report(args) -> int:
             "arm": traj["arm"],
             "resolved": bool(report and report.get("resolved")),
             "patch_applied": bool(report and report.get("patch_successfully_applied")),
-            "failure_class": classify_failure(traj, report, denial_rate, fidelity_hit),
+            "failure_class": classify_failure(traj, report, denial_rate, fidelity_hit, baseline),
+            "env_checked": iid in baseline,
             "turns": traj.get("turns", 0),
             "assistant_messages": traj.get("assistant_messages", ""),
             "cap_bound": traj.get("cap_bound", ""),
@@ -621,11 +753,20 @@ def cmd_report(args) -> int:
         w.writerows(rows)
 
     resolved = sum(r["resolved"] for r in rows)
+    env_suspect = sum(1 for r in rows if r["failure_class"] == "environment-suspect")
+    unchecked_p2p = [r["instance_id"] for r in rows
+                     if r["failure_class"] == "applied-broke-P2P" and not r["env_checked"]]
     empty_observed = sum(1 for r in rows if not r["dfc_observed"])
     capped = sum(1 for r in rows if r["cap_bound"] is True)
     fps = {rec.get("cls", "") for rec in records}
     print(f"wrote {out}")
     print(f"resolved        : {resolved}/{len(rows)}")
+    if env_suspect:
+        print(f"env-suspect     : {env_suspect}   (P2P failures reproduce with no patch; "
+              f"excluded from the model's record, D25)")
+    if unchecked_p2p:
+        print(f"unchecked P2P   : {len(unchecked_p2p)} applied-broke-P2P row(s) never tested "
+              f"against a no-patch baseline - run `envcheck --run-id {args.run_id}`")
     print(f"hit turn cap    : {capped}/{len(rows)}"
           + ("   ! a binding cap penalises restricted arms structurally (\u00a77)"
              if capped else ""))
@@ -910,6 +1051,17 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--max-workers", type=int, default=4)
     e.add_argument("--cache-level", default="env")
     e.set_defaults(func=cmd_evaluate)
+
+    ec = sub.add_parser("envcheck", help="D25: evaluate instances with NO patch to learn "
+                                          "which tests fail on the pristine environment")
+    ec.add_argument("--run-id", required=True,
+                    help="run whose P2P-broken instances to check (or use --instances)")
+    ec.add_argument("--instances", default=None, metavar="ID,ID")
+    ec.add_argument("--force", action="store_true", help="re-evaluate even if a baseline "
+                                                          "report exists (union the results)")
+    ec.add_argument("--max-workers", type=int, default=4)
+    ec.add_argument("--cache-level", default="env")
+    ec.set_defaults(func=cmd_envcheck)
 
     r = sub.add_parser("report", help="join results into dfc_report.csv")
     r.add_argument("--run-id", required=True)

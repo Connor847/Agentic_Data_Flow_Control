@@ -68,6 +68,7 @@ python -m dfc.run doctor      # one live SDK call, no Docker: proves auth + tool
 ```bash
 python -m dfc.run solve    --n 30 --arm arm0 --max-turns 100 --run-id my-arm0
 python -m dfc.run evaluate --run-id my-arm0
+python -m dfc.run envcheck --run-id my-arm0     # which P2P failures happen with no patch?
 python -m dfc.run report   --run-id my-arm0
 python -m dfc.run audit    --run-id my-arm0     # did any rewrite change what was asked?
 ```
@@ -103,7 +104,10 @@ Each of these cost real time and is recorded in `DECISIONS.md`.
   instance reaches the cap, raise it and re-run (D14).
 - **Some SWE-bench Lite instances depend on a live third-party service.** Three
   `psf__requests` instances call `httpbin.org`; when it returns 503 the tests fail
-  regardless of the patch, and the harness scores that as a model regression.
+  regardless of the patch, and the harness scores that as a model regression. Run
+  `python -m dfc.run envcheck --run-id X` after `evaluate`: it grades the P2P-broken
+  instances with no patch at all, and `report` then labels rows whose failures
+  reproduce on the pristine container `environment-suspect` instead (D25).
 - **The agent can pass its own tests and still fail.** Several trajectories close with
   "all tests pass" after running a filtered subset that excludes the target test. Use
   `dfc.run inspect --failures`, which flags this.

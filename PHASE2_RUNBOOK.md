@@ -267,3 +267,4 @@ Roughly 180 trajectories (2 arms × 3 seeds × n=30). Notes:
 - Denial attribution naming real culprits, not `cd`
 - No `harness-error` rows caused by `PatchTooLarge`, and no path appearing in both
   `preexisting_dirty` and the agent's write set (D20)
+- `envcheck` run on every run-id; no `unchecked P2P` line in any report (D25)

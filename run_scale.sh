@@ -43,6 +43,7 @@ for seed in "${SEEDS[@]}"; do
     rid="dfc-${arm}-s${seed}"
     log "EVALUATE ${rid}"
     python -m dfc.run evaluate --run-id "$rid" --max-workers "$WORKERS"
+    python -m dfc.run envcheck --run-id "$rid" --max-workers "$WORKERS"
     python -m dfc.run report   --run-id "$rid"
     python -m dfc.run audit    --run-id "$rid" --high-only
   done

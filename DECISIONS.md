@@ -888,3 +888,59 @@ Coverage is overstated by at most that much.
 forms that still must, `cat -n` untouched, denial (not mangling) at the classifier for
 the single and pipeline shapes, four malformed rewrites the audit must rate high, and
 six well-formed greps it must not.
+
+---
+
+## D25 — `environment-suspect`: score the environment, not the model, when the environment is broken (2026-09-18)
+
+Sixteen scale-run trajectories are labelled `applied-broke-P2P` — the patch applied
+and previously-passing tests now fail — on five instances where the patch is not what
+broke them: `psf__requests-1963/2148/2317` (tests call `httpbin.org` live; 23–34
+failures, identical 25-test core across six different patches, one run with zero when
+the service was up) and `sphinx-doc__sphinx-8435/8627` (16 and 17 `typing`-internals
+failures, identical in every run). The report scored all sixteen against the model.
+
+**Why not the handoff's "identical across trajectories" rule.** The obvious detector —
+same P2P failure set across ≥2 trajectories with different patches — has a false
+positive that this run exposed: `sphinx-10451` fails the same three P2P tests in three
+trajectories with three different patches, because the model makes the same
+over-broad fix every time. Identical failure is consistent with a broken environment
+*and* with a consistently wrong model. The two cannot be told apart from patched runs.
+
+**Decision: measure the environment directly.** `dfc.run envcheck --run-id X`
+evaluates every P2P-broken instance in X with **no model patch** (a one-file inert
+diff, since the harness skips an empty one) under the harness run-id `dfc-envcheck`,
+and records the tests that fail anyway in `runs/envcheck/baseline.json`. Successive
+envchecks *union* into the baseline, because a live-service test that fails on
+Tuesday and passes on Wednesday is still an environment failure. Docker time only;
+no agent, no quota.
+
+`classify_failure` then applies one rule, before the regression branch: **if every
+P2P failure in the report also fails with no patch, the label is
+`environment-suspect`.** Subset, not overlap — one failing test the baseline has never
+seen means the patch did break something, and the row stays `applied-broke-P2P`.
+`sphinx-10451`'s three tests pass on the pristine container, so it is correctly not
+caught. F2P results on an environment-suspect row are not scored either: the same
+broken service sits under them.
+
+`report` prints how many rows are environment-suspect and, when any
+`applied-broke-P2P` row has never been baselined, says so and names the command.
+`dfc_report.csv` gains `env_checked`.
+
+**What this is and is not.** It is the cheap, automatic version of the human
+annotation OpenAI paid for to build SWE-bench Verified: "does this instance's test
+suite pass in its own container before anyone touches it." It is not a claim that the
+instance is unsolvable; a patch that also repaired the environment would resolve it.
+It moves those rows out of the model's record into a category the paper reports
+separately, with the baseline file as the evidence.
+
+**Expected effect on the 21 Aug data.** After `envcheck` on the six scale-run run-ids,
+sixteen rows move from `applied-broke-P2P` to `environment-suspect`. The paired
+comparison does not change — all sixteen are concordant — and the resolve rate over
+the remaining 74 pairs is what the paper should report, alongside the 90-pair figure.
+
+Outside the fingerprint. 326 tests pass, eight new: the httpbin case, a real
+regression on top of environment failures staying a regression, environment beating
+`rewrite-infidelity`, no-baseline and empty-baseline leaving the old label, F2P-only
+having no environment signal, baseline union across runs, and the no-op patch being
+a single inert new file.

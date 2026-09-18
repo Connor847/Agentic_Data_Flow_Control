@@ -781,3 +781,78 @@ def test_taxonomy_covers_every_returned_label():
         run.classify_failure({"model_patch": "d"}, {"resolved": True}, 0, False),
     }
     assert labels <= set(run.TAXONOMY)
+
+
+# --------------------------------------------------------------------------
+# D25 - environment-suspect: P2P failures that reproduce with no patch
+# --------------------------------------------------------------------------
+
+def _rep(p2p_fail, f2p_fail=(), applied=True):
+    return {"resolved": False, "patch_successfully_applied": applied,
+            "tests_status": {"PASS_TO_PASS": {"failure": list(p2p_fail), "success": []},
+                             "FAIL_TO_PASS": {"failure": list(f2p_fail), "success": []}}}
+
+
+HTTPBIN = ["t::test_POSTBIN_GET_POST_FILES", "t::test_basicauth_with_netrc"]
+
+
+def test_p2p_failures_that_reproduce_without_a_patch_are_environment():
+    """psf__requests-1963: 25 identical P2P failures across six different patches,
+    all httpbin.org. A patch cannot cause a failure that happens without it."""
+    from dfc import run
+    base = {"psf__requests-1963": {"p2p_failures": HTTPBIN + ["t::other"], "f2p_failures": []}}
+    traj = {"instance_id": "psf__requests-1963", "model_patch": "x", "stop_reason": "success"}
+    assert run.classify_failure(traj, _rep(HTTPBIN), 0.0, False, base) == "environment-suspect"
+
+
+def test_a_real_regression_on_top_of_env_failures_is_still_a_regression():
+    """Subset, not intersection: one failing test the baseline has never seen means
+    the patch broke something, whatever else the environment is doing."""
+    from dfc import run
+    base = {"i": {"p2p_failures": HTTPBIN, "f2p_failures": []}}
+    traj = {"instance_id": "i", "model_patch": "x", "stop_reason": "success"}
+    assert run.classify_failure(traj, _rep(HTTPBIN + ["t::mine"]), 0.0, False, base) == "applied-broke-P2P"
+
+
+def test_env_beats_rewrite_infidelity():
+    from dfc import run
+    base = {"i": {"p2p_failures": HTTPBIN, "f2p_failures": []}}
+    traj = {"instance_id": "i", "model_patch": "x", "stop_reason": "success"}
+    assert run.classify_failure(traj, _rep(HTTPBIN), 0.0, True, base) == "environment-suspect"
+
+
+def test_no_baseline_leaves_the_old_label():
+    from dfc import run
+    traj = {"instance_id": "i", "model_patch": "x", "stop_reason": "success"}
+    assert run.classify_failure(traj, _rep(HTTPBIN), 0.0, False, None) == "applied-broke-P2P"
+    assert run.classify_failure(traj, _rep(HTTPBIN), 0.0, False, {}) == "applied-broke-P2P"
+
+
+def test_env_requires_p2p_failures():
+    """An F2P-only failure has no environment signal; baseline F2P failures are
+    trivially everything (they fail before the fix by definition)."""
+    from dfc import run
+    base = {"i": {"p2p_failures": HTTPBIN, "f2p_failures": ["t::f"]}}
+    traj = {"instance_id": "i", "model_patch": "x", "stop_reason": "success"}
+    assert run.classify_failure(traj, _rep([], ["t::f"]), 0.0, False, base) == "applied-F2P-unfixed"
+
+
+def test_merge_baseline_unions_across_runs():
+    """Live-service tests fail intermittently; every test ever seen failing with no
+    patch counts, so a second envcheck widens rather than replaces."""
+    from dfc import run
+    b = run.merge_baseline({}, "i", _rep(["a", "b"]))
+    b = run.merge_baseline(b, "i", _rep(["b", "c"]))
+    assert b["i"]["p2p_failures"] == ["a", "b", "c"]
+    assert b["i"]["runs"] == 2
+
+
+def test_noop_patch_is_a_single_inert_new_file():
+    from dfc import run, container
+    assert container.paths_in_patch(run.NOOP_PATCH) == ["dfc_envcheck.txt"]
+    assert "new file mode" in run.NOOP_PATCH
+
+
+def test_taxonomy_lists_environment_suspect():
+    from dfc import run
+    assert "environment-suspect" in run.TAXONOMY
