@@ -218,3 +218,34 @@ def test_unparseable_lines_counted_not_silently_dropped(tmp_path):
     (run / "flow_log.jsonl").write_text('{"command": "if [ ; then", "outcome": "observed"}\n')
     c = census.collect(tmp_path / "runs")["arm0"]
     assert c.unparseable == 1 and c.invocations == 0
+
+
+# --------------------------------------------------------------------------
+# D24 - a rewrite that produces a command that cannot run
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("command,executed", [
+    ("cat -A f.py", 'grep "" -A f.py'),
+    ("cat -A /dev/null; sed -n '1,3p' f", 'grep "" -A /dev/null; awk \'NR>=1&&NR<=3\' f'),
+    ("awk 'NR<3' f | cat -A | head -3", 'awk \'NR<3\' f | grep "" -A | head -3'),
+    ("cat -A 2>/dev/null f.py", 'grep "" -A 2>/dev/null f.py'),
+])
+def test_malformed_grep_rewrite_is_high(command, executed):
+    """These ran 15 times in the scale run and were filed as low-severity framing
+    findings. A grep with -A and no count does not run; that is the highest severity
+    the audit has."""
+    fs = audit.inspect(command, executed)
+    assert any(f.kind == "malformed-rewrite" and f.severity == "high" for f in fs), fs
+
+
+@pytest.mark.parametrize("executed", [
+    'grep "" f.py',
+    'grep -m 10 "" f.py',
+    'grep -A 3 pattern f.py',
+    'grep -n "" f.py',
+    'grep -c "" f.py',
+    'grep "" a.py b.py | head -20',
+])
+def test_well_formed_grep_is_not_flagged(executed):
+    fs = audit.inspect("cat something", executed)
+    assert not any(f.kind == "malformed-rewrite" for f in fs), fs

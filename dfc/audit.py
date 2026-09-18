@@ -72,6 +72,15 @@ def _operands(cmd: str) -> set[str]:
             if not t.startswith("-") and t not in (">", ">>", "<", "|", "&&", ";")}
 
 
+#: grep options that require an argument, followed by something that is not one:
+#: end of the segment, a pipe/redirect/separator, or (for the numeric ones) a
+#: non-number. `-A` at end of string is the `| cat -A |` pipeline shape; `2>/dev/null`
+#: after the flag is a redirect, not a count.
+MALFORMED_GREP = re.compile(
+    r"\bgrep\b[^|;&\n]*?\s(-[ABCm])(?:\s*$|\s*(?=[|;&<>\n])|\s+(?![0-9]+(?:\s|$)))"
+)
+
+
 def inspect(command: str, executed: str, *, instance_id: str = "",
             rules: list[str] | None = None) -> list[Finding]:
     """Structural comparison of what was asked for against what was run."""
@@ -113,7 +122,17 @@ def inspect(command: str, executed: str, *, instance_id: str = "",
         add("redirect-shape-changed", "low",
             f"redirect shape {a or 'none'} became {b or 'none'}")
 
-    # 5. Output framing changes that are faithful in content but not in shape. `grep`
+    # 5. D24: the executed form is not a well-formed invocation. `cat -A f` became
+    #    `grep "" -A f`; grep's -A/-B/-C/-m take a number, and `grep "" -A f` or
+    #    `grep "" -A | head` errors out. A rewrite that cannot run is the worst
+    #    kind of rewrite: the agent asked for a read and got nothing. Also catches
+    #    a bare -e/-f with no following operand.
+    for m in MALFORMED_GREP.finditer(executed):
+        add("malformed-rewrite", "high",
+            f"executed grep has {m.group(1)!r} without a valid argument "
+            f"(`{m.group(0).strip()}`)")
+
+    # 6. Output framing changes that are faithful in content but not in shape. `grep`
     #    over several files prefixes every line with its filename, which breaks any
     #    downstream parse.
     if re.search(r'grep\s+""', executed):

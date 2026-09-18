@@ -193,12 +193,20 @@ RULES: list[Rule] = [
     # multiple files and globs, and row 1 plainly intends to cover reading files.
     # D16: the multi-operand case is the only lossy one - grep prefixes each line with
     # its filename - so the flag is decided per match rather than for the rule.
+    # D24: the operand list must carry no flags. `cat -A f` (show non-printing
+    # characters) was matched with `-A f` as the file list and became `grep "" -A f`,
+    # where grep's -A wants a context count - a malformed command, run 15 times across
+    # the scale run before the audit surfaced it. No cat flag has a grep equivalent
+    # (-A/-v/-e/-t/-E/-T change rendering, -s squeezes blanks, -b numbers non-blank),
+    # so a flagged cat falls through to a denial, which the agent sees. A lone `--`
+    # is allowed; grep accepts it identically.
     Rule("cat_read", 1, "grep", "READ", "MED", True,
-         _rx(r"^cat\s+(?P<f>[^|<>]+?)\s*$"),
+         _rx(r"^cat\s+(?!(?:[^|<>]*\s)?-(?!-(?:\s|$)))(?P<f>[^|<>]+?)\s*$"),
          lambda m: 'grep "" %s' % m.group("f").strip(), "Verified",
          "Faithful for one file; grep adds a trailing newline if the source lacks one. "
          "For several files grep prefixes each line with the filename, so content is "
-         "preserved but framing differs. grep . is NOT equivalent (drops blanks).",
+         "preserved but framing differs. grep . is NOT equivalent (drops blanks). "
+         "Flagged forms (cat -A, -s, -b, ...) have no grep equivalent and do not match.",
          lossy_when=lambda m: len(m.group("f").split()) > 1
                               or any(g in m.group("f") for g in "*?[")),
 

@@ -405,3 +405,24 @@ def test_trifecta_is_computed_not_heuristic():
             if t.value == "secrets.txt":
                 t.label = Label(Confidentiality.SENSITIVE, Integrity.UNTRUSTED)
     assert d.trifecta() is True
+
+
+# --------------------------------------------------------------------------
+# D24 - a flagged cat is denied, visibly, rather than rewritten into an error
+# --------------------------------------------------------------------------
+
+def test_cat_A_is_denied_not_mangled():
+    d = classify("cat -A f.py", ARM1)
+    assert d.outcome == Outcome.DENIED
+    assert "grep" not in (getattr(d, "executed", "") or "")
+
+
+def test_cat_A_in_a_pipeline_is_denied_not_mangled():
+    """`awk ... | cat -A | head` became `... | grep "" -A | head`, which errors."""
+    d = classify("awk 'NR<3' f.py | cat -A | head -3", ARM1)
+    assert d.outcome == Outcome.DENIED
+
+
+def test_plain_cat_still_rewrites_to_grep():
+    d = classify("cat f.py", ARM1)
+    assert d.outcome == Outcome.REWRITTEN

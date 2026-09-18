@@ -831,3 +831,60 @@ with the seeded runs. `run_retry_d20-d22.sh` is the first use and follows this s
 
 291 tests pass, two new (id parsing; the evaluation-log removal touches only the named
 instances).
+
+---
+
+## D24 — `cat -A` was rewritten to a malformed `grep`; fingerprint moves (2026-09-18)
+
+The D23 diagnostic run's audit listed `cat -A /dev/null` → `grep "" -A /dev/null` and
+`... | cat -A | head` → `... | grep "" -A | head` as *low-severity* `multifile-grep-prefix`
+findings. They are neither low nor about prefixes. `cat -A` shows non-printing
+characters; grep's `-A` is a context count and requires a number, so both rewritten
+forms fail with an argument error. The agent asked to read a file and received an
+error — or, with `2>/dev/null` (`flask-5063`), silently received nothing.
+
+**Cause.** `cat_read`'s regex `^cat\s+(?P<f>[^|<>]+?)\s*$` captures everything after
+`cat` as the file list, flags included, and pastes it after `grep ""`. The rule was
+widened on 2026-08-11 to accept multiple operands and globs; nothing excluded flags.
+
+**Extent.** 15 occurrences across the Arm 1 flow logs (scale run, pilots, diag), all
+`-A`, in ~10 trajectories. Exit codes on the compound lines were 0 because a later
+segment succeeded, which is why nothing tripped. No trajectory outcome is attributable
+to it — the agent typically saw the error and read the file another way — but the
+`2>/dev/null` shape is the D16 failure mode exactly: a silent wrong answer.
+
+**Decision, two parts.**
+
+1. `canon.py`: `cat_read` no longer matches when any operand begins with `-` (a lone
+   `--` excepted; grep accepts it identically). No `cat` flag has a grep equivalent
+   (`-A/-v/-e/-t/-E/-T` change rendering, `-s` squeezes blanks, `-b` numbers non-blank
+   lines), so a flagged `cat` falls through to a denial the agent can see. `cat -n` is
+   unaffected; it has its own rule. Edge: `cat -- -oddname` is now denied rather than
+   rewritten; acceptable and conservative.
+2. `audit.py`: new check `malformed-rewrite`, high severity — an executed `grep` whose
+   `-A/-B/-C/-m` is followed by nothing, a separator, or a non-number (a `2>/dev/null`
+   redirect after the flag counts as nothing). Re-run against the three scale-run Arm 1
+   logs it finds **3 + 5 + 3 = 11 high-severity findings** that the 21 Aug audit
+   reported as zero. The readout's "zero high-severity audit findings" gate was true
+   under the audit of the day and is false under this one; that sentence must change.
+
+**Consequence: the classifier fingerprint moves, `c0b87151304a` → `76f60a616dbb`.**
+`canon.py` is fingerprinted, so by D14 every run from here is not comparable to the
+180 scale-run trajectories on flow-derived metrics — coverage, denial rate,
+selectivity, escape targets. Resolve rate and cost remain comparable: the change turns
+15 malformed rewrites into 15 visible denials, which can only shift the
+rewritten/denied split, not what the harness grades. This was chosen over deferring
+the fix to a batch (with the open D17 `sed c` question) because the diagnostic run
+existed to find bugs and a known-malformed rewrite left in place contradicts D16.
+Any further canon change before the next scale run should be batched with this one so
+the fingerprint moves once more at most.
+
+**For the writeup.** The 21 Aug flow metrics stand as measured under `c0b87151304a`,
+with the caveat that ~15 of the 3,558 Arm 1 invocations (0.4%) were rewritten into
+commands that could not run and are counted as `rewritten` rather than `denied`.
+Coverage is overstated by at most that much.
+
+318 tests pass, 27 new: eight flagged-`cat` forms that must not match, five unflagged
+forms that still must, `cat -n` untouched, denial (not mangling) at the classifier for
+the single and pipeline shapes, four malformed rewrites the audit must rate high, and
+six well-formed greps it must not.

@@ -50,7 +50,7 @@ done
 
 log "DONE"
 echo "Check before analysing:"
-echo "  - one classifier fingerprint (c0b87151304a) across all six reports"
+echo "  - one classifier fingerprint (76f60a616dbb after D24; c0b87151304a for the 21 Aug data) across all six reports"
 echo "  - no instance cap-bound at ${CAP} in any run"
 echo "  - zero high-severity audit findings (D16)"
 echo "  - no 'empty-patch-after-success' rows in any dfc_report.csv (D19)"

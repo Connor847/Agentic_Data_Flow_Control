@@ -93,6 +93,9 @@ Each of these cost real time and is recorded in `DECISIONS.md`.
   rewritten to `ls -R /` — an unbounded listing of the whole filesystem in place of a
   bounded search. A denial is visible to the agent and to you; silent corruption is
   visible to neither. Run `dfc.run audit` after every run (D16).
+- **`cat -A` was silently rewritten into a `grep` that could not run** (D24). The
+  audit now rates a malformed rewrite `high`; run it after every run and read the
+  high findings, not just the count.
 - **The classifier version is fingerprinted.** Two runs on different fingerprints are
   not comparable on any flow-derived metric. `report` says so when it detects a mix (D14).
 - **A binding turn cap invalidates the cost comparison.** The restricted arm needs more

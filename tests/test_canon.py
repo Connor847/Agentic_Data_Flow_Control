@@ -107,3 +107,39 @@ def test_unmatched_command_returns_unchanged():
     out, rule = canon.canonicalize("cmake --build .")
     assert out == "cmake --build ."
     assert rule is None
+
+
+# --------------------------------------------------------------------------
+# D24 - cat flags must not be pasted into the grep rewrite
+# --------------------------------------------------------------------------
+
+import pytest as _pytest
+from dfc.canon import canonicalize as _canon
+
+
+@_pytest.mark.parametrize("cmd", [
+    "cat -A f.py", "cat f.py -A", "cat -s f.py", "cat -b f.py", "cat -A -n f.py",
+    "cat --show-all f.py", "cat -A 2>/dev/null f.py", "cat -A",
+])
+def test_flagged_cat_is_not_rewritten(cmd):
+    """`cat -A f` became `grep "" -A f` - grep's -A wants a count - 15 times in the
+    scale run. No cat flag has a grep equivalent; the rule must not match."""
+    out, rule = _canon(cmd)
+    assert out == cmd and (rule is None or rule.name != "cat_read"), (out, rule)
+
+
+@_pytest.mark.parametrize("cmd,expected", [
+    ("cat f.py", 'grep "" f.py'),
+    ("cat -- f.py", 'grep "" -- f.py'),
+    ("cat foo-bar.py", 'grep "" foo-bar.py'),
+    ("cat a.py b.py", 'grep "" a.py b.py'),
+    ("cat dir/*.rst", 'grep "" dir/*.rst'),
+])
+def test_unflagged_cat_still_rewrites(cmd, expected):
+    out, rule = _canon(cmd)
+    assert out == expected and rule.name == "cat_read"
+
+
+def test_cat_n_still_goes_to_cat_numbered():
+    out, rule = _canon("cat -n f.py")
+    assert out == 'grep -n "" f.py' and rule.name == "cat_numbered"
