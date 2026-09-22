@@ -944,3 +944,67 @@ regression on top of environment failures staying a regression, environment beat
 `rewrite-infidelity`, no-baseline and empty-baseline leaving the old label, F2P-only
 having no environment signal, baseline union across runs, and the no-op patch being
 a single inert new file.
+
+---
+
+## D26 — The environment hypothesis was wrong for sphinx, and right for requests in a way the baseline cannot see (2026-09-22)
+
+`envcheck` ran on all six scale-run run-ids. With no model patch, the pristine
+containers pass **every** PASS_TO_PASS test on `sphinx-8435`, `sphinx-8627`,
+`requests-2148` and `requests-2317`, and all but one on `requests-1963`. The handoff's
+§4b claim — "six instances fail for reasons the patch cannot affect" — is false as
+stated. Two different things were going on.
+
+### sphinx-8435 / 8627: a harness defect, D20's sibling
+
+Every sphinx patch carried edits to `setup.py` and `tox.ini` the agent never made.
+SWE-bench builds its sphinx images by editing those files in place (dependency pins,
+`pytest -rA`), leaving them as **modified tracked files** in the working tree. D20's
+`build/` was untracked; this is the same defect one column over in `git status`, and
+`git add -A` swept it up identically.
+
+The consequence in the eval container is worse than D20's. The same edits are already
+present there, so `git apply` fails on those hunks, `git apply --reject` fails, and the
+official harness falls back to `patch --batch --fuzz=5`. GNU patch in batch mode, on
+seeing hunks that are already applied, prints `Reversed (or previously applied) patch
+detected! Assuming -R.` and applies the **whole patch in reverse** — five files,
+including `sphinx/util/typing.py`. `run_instance.log` records it, then `Git diff
+before:` is empty: the agent's fix was never in the tree, and the image's `-rA` pin
+was removed from `tox.ini`, so pytest emitted no per-test PASSED lines and the log
+parser scored all 16–17 P2P tests as failures. That is why the failure set was
+"identical in every run": it was the parser's, not the model's.
+
+`patch_successfully_applied: True` throughout. The harness had no idea.
+
+**Fix.** D20 already covers it: `snapshot_start_state()` records `git status
+--porcelain` in full, modified entries included, and unstages them at extraction.
+No code change to the mechanism; three tests added pinning the modified-tracked
+shape explicitly, since D20's tests only exercised `?? build/`. The four scale-run
+trajectories are re-solved with `--retry` under D23's rule.
+
+### requests-1963 / 2148 / 2317: environmental, but time-dependent
+
+These patches are clean (`requests/sessions.py`, `requests/models.py` only). The
+August grades showed 23–34 P2P failures; the September no-patch baseline shows 0–1.
+`httpbin.org` was degraded on 21 Aug and is healthy now. The union-baseline design
+(D25) cannot represent "the service was down on the day the patch was graded"; a
+baseline taken on a good day exonerates nothing.
+
+**Fix.** `evaluate --regrade ID,ID` discards those instances' harness reports and
+grades the **same patches** again. This is not a re-solve and not selection on the
+outcome: the patch is unchanged, only the day is. Twelve trajectories. If httpbin is
+up, they get real grades; if it is down again, `envcheck` run in the same pass
+records it and `report` labels them `environment-suspect`. The runbook now says to run
+`envcheck` in the same pass as `evaluate`, for exactly this reason.
+
+`merge_baseline` was also double-counting: `envcheck` merged every requested report on
+every call, including ones the harness skipped as already complete, so `runs` read 12
+after two passes. It now merges only reports the harness produced during that call.
+
+### What this does to the handoff's arithmetic
+
+The "n=80 excluding six environment instances" baseline in §4b should not be
+reported. After the retries and regrades the honest figure is whatever the harness
+returns; the exclusion set is empty until `report` says otherwise.
+
+329 tests pass.

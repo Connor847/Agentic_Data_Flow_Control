@@ -267,4 +267,7 @@ Roughly 180 trajectories (2 arms × 3 seeds × n=30). Notes:
 - Denial attribution naming real culprits, not `cd`
 - No `harness-error` rows caused by `PatchTooLarge`, and no path appearing in both
   `preexisting_dirty` and the agent's write set (D20)
-- `envcheck` run on every run-id; no `unchecked P2P` line in any report (D25)
+- `envcheck` run on every run-id **in the same pass as `evaluate`** (a live-service
+  outage must be captured on the day it affects the grade, D26); no `unchecked P2P`
+  line in any report (D25)
+- No `Assuming -R` in any `run_instance.log` (D26: the patch carried image state)

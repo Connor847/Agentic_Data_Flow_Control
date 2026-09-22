@@ -586,6 +586,16 @@ def cmd_evaluate(args) -> int:
         print(f"no predictions at {preds}", file=sys.stderr)
         return 1
     meta = json.loads((run_dir / "sample.json").read_text())
+    ids = list(meta["instance_ids"])
+    regrade = _csv_ids(getattr(args, "regrade", None))
+    if regrade:
+        # D26: re-grade the SAME patch. For instances whose tests depend on a live
+        # service, the grade is a property of the service on the day, not of the
+        # patch; re-grading is the only way to separate the two without re-solving.
+        # The harness skips an instance with an existing report, so forget it first.
+        n = _forget_evaluation(args.run_id, regrade)
+        ids = sorted(regrade & set(ids))
+        print(f"regrade   : {len(ids)} instance(s), {n} stale report(s) removed (D26)")
 
     cmd = [
         sys.executable, "-m", "swebench.harness.run_evaluation",
@@ -595,7 +605,7 @@ def cmd_evaluate(args) -> int:
         "--max_workers", str(args.max_workers),
         "--run_id", args.run_id,
         "--cache_level", args.cache_level,
-        "--instance_ids", *meta["instance_ids"],
+        "--instance_ids", *ids,
     ]
     print(" ".join(cmd), "\n")
     proc = subprocess.run(cmd)
@@ -641,6 +651,7 @@ def cmd_envcheck(args) -> int:
 
     print(f"envcheck  : {len(ids)} instance(s) with no model patch -> "
           f"logs/run_evaluation/{ENVCHECK_RUN_ID}/")
+    started = time.time()
     cmd = [
         sys.executable, "-m", "swebench.harness.run_evaluation",
         "--dataset_name", meta["dataset"], "--split", meta["split"],
@@ -658,7 +669,11 @@ def cmd_envcheck(args) -> int:
         if rep is None:
             print(f"  {iid:38s} no report (harness error?)")
             continue
-        baseline = merge_baseline(baseline, iid, rep)
+        report_path = Path("logs/run_evaluation") / ENVCHECK_RUN_ID / MODEL_NAME / iid / "report.json"
+        if report_path.stat().st_mtime >= started:
+            baseline = merge_baseline(baseline, iid, rep)
+        elif iid not in baseline:
+            baseline = merge_baseline(baseline, iid, rep)
         n = len(baseline[iid]["p2p_failures"])
         print(f"  {iid:38s} P2P failing with no patch: {n}"
               + ("   <- environment" if n else ""))
@@ -1050,6 +1065,9 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--run-id", required=True)
     e.add_argument("--max-workers", type=int, default=4)
     e.add_argument("--cache-level", default="env")
+    e.add_argument("--regrade", default=None, metavar="ID,ID",
+                   help="D26: discard these instances' harness reports and grade the "
+                        "same patches again (live-service flakiness)")
     e.set_defaults(func=cmd_evaluate)
 
     ec = sub.add_parser("envcheck", help="D25: evaluate instances with NO patch to learn "

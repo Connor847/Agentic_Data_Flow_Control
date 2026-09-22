@@ -856,3 +856,38 @@ def test_noop_patch_is_a_single_inert_new_file():
 def test_taxonomy_lists_environment_suspect():
     from dfc import run
     assert "environment-suspect" in run.TAXONOMY
+
+
+# --------------------------------------------------------------------------
+# D26 - image-modified TRACKED files are in the start-state snapshot too
+# --------------------------------------------------------------------------
+
+SPHINX_IMAGE_STATUS = " M setup.py\n M tox.ini\n"
+
+
+def test_image_modified_tracked_files_are_snapshotted(monkeypatch):
+    """SWE-bench's sphinx images pin dependencies by editing setup.py and tox.ini at
+    build time. Those edits are MODIFIED tracked files, not untracked ones, and
+    they went into every sphinx patch. In the eval container the same edits were
+    already present, `git apply` failed, and the harness's `patch --batch` fallback
+    saw 'previously applied' and reverse-applied the ENTIRE patch - including the
+    agent's fix. D20's snapshot must cover this shape, not just untracked build/."""
+    c = _git(monkeypatch, status=SPHINX_IMAGE_STATUS)
+    assert c.snapshot_start_state() == ["setup.py", "tox.ini"]
+
+
+def test_image_modified_files_are_unstaged_from_the_patch(monkeypatch):
+    c = _git(monkeypatch, status=SPHINX_IMAGE_STATUS,
+             diff="diff --git a/sphinx/util/typing.py b/sphinx/util/typing.py\n+fix\n")
+    c.snapshot_start_state()
+    c.cmds.clear()
+    patch = c.model_patch()
+    assert "setup.py" not in patch and patch.startswith("diff --git a/sphinx/util/typing.py")
+    assert "git reset -q -- setup.py tox.ini" in c.cmds
+
+
+def test_agent_edits_to_other_files_survive_the_image_snapshot(monkeypatch):
+    c = _git(monkeypatch, status=SPHINX_IMAGE_STATUS)
+    c.snapshot_start_state()
+    c.status = SPHINX_IMAGE_STATUS + " M sphinx/util/typing.py\n?? tests/new_fixture.py\n"
+    assert c.agent_dirty_paths() == ["sphinx/util/typing.py", "tests/new_fixture.py"]
