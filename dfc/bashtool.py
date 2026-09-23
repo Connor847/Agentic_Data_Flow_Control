@@ -227,7 +227,8 @@ def make_server(tool: BashTool):
     """
     from claude_agent_sdk import create_sdk_mcp_server, tool as sdk_tool
 
-    @sdk_tool(TOOL_NAME, TOOL_DESCRIPTION, {"command": str})
+    @sdk_tool(TOOL_NAME, TOOL_DESCRIPTION.replace("/testbed", getattr(tool.container, "repo_dir", "/testbed")),
+              {"command": str})
     async def _bash(args):
         return tool.run(args["command"])
 

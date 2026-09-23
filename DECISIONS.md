@@ -1008,3 +1008,63 @@ reported. After the retries and regrades the honest figure is whatever the harne
 returns; the exclusion set is empty until `report` says otherwise.
 
 329 tests pass.
+
+---
+
+## D27 — SWE-bench Pro adapter; the pilot is the two pytest repos (2026-09-23)
+
+The Lite triage is done: every concordant failure has a named cause, and the remaining
+failures are the model's. Pro is where the experiment was always headed (§7, Phase 4).
+
+**What differs, and where it lives.** Nothing that decides what a command *means*
+changes: `classifier.py`, `policy.py`, `canon.py` are untouched and the fingerprint
+stays `76f60a616dbb`. Everything benchmark-specific is now in `dfc/bench.py` as a
+profile — dataset, checkout path, image naming, `docker run` shape, grader — and
+`sample.py`, `container.py`, `solver.py`, `run.py` read it instead of hard-coding
+Lite. `--bench pro` on `solve` selects it; `sample.json` records it so `evaluate`,
+`envcheck`, `report` and `inspect` follow without being told again. Lite is
+byte-identical (tested: same image names, same prompts, same `docker run`).
+
+| | Lite | Pro |
+|---|---|---|
+| Dataset | `princeton-nlp/SWE-bench_Lite` | `ScaleAI/SWE-bench_Pro` (731 public) |
+| Checkout | `/testbed` | `/app` |
+| Image | `swebench/sweb.eval.x86_64.<id>` | `jefzda/sweap-images:<repo>.<name>-<id>` (128-char cap; mirrors `helper_code/image_uri.py`) |
+| Entrypoint | none | `ENTRYPOINT ["/bin/bash"]` → `--entrypoint sleep` + `infinity` |
+| Hidden tests | `git apply` of a test patch | `git checkout <sha> -- <files>` from a commit already in the image |
+| Model patch | `git apply`, fuzzy `patch` fallback (D26) | `git apply -v`, no fallback; entryscript has no `set -e` |
+| Grader | `swebench.harness.run_evaluation` → `report.json` | `swe_bench_pro_eval.py --use_local_docker` → `<prefix>_output.json`, flat test list |
+
+`bench.pro_report()` turns the flat list into the `tests_status` shape
+`classify_failure` already reads, and infers `patch_successfully_applied` from the
+entryscript's `git apply -v` stderr — necessary because a failed apply still runs the
+tests on the base commit and would otherwise read as "applied, unfixed".
+
+**D20–D22 carry over unchanged**, and D21 matters less: `git checkout -- <paths>`
+overwrites an agent-created file where `git apply` refused. D20 matters as much: the
+Pro entryscript's `git reset --hard` clears modified tracked files but not untracked
+ones, and the images are built by third-party Dockerfiles.
+
+**The pilot is `internetarchive/openlibrary` and `qutebrowser/qutebrowser` only.**
+Pro's public split has eleven repos in four languages. Arm 1's execute rule admits
+`pytest` and `python -m pytest`; a repo whose native runner is `go test`, `npm test`
+or `python bin/ansible-test` cannot run its own tests under the restriction. Including
+those repos in a paired run would measure a tooling gap in the primitive set, not the
+restriction, and the two would be inseparable in the result. Of the three Python
+repos, ansible is excluded for that reason (`ansible-test`). Widening the execute rule
+to other runners is a real design decision — it moves the fingerprint and needs its
+own entry — and is the obvious next one once the pilot shows Pro works at all.
+`--repos` overrides the default; `PRO_PYTHON_REPOS` adds ansible back.
+
+**Design: 2 arms × n=30, one seed (`20260923`), stratified round-robin across the two
+repos (15 each), cap 150.** A smoke phase — one instance, arm0, solve + grade — runs
+first and aborts the script on a container or grader failure, so an overnight run
+cannot burn sixty trajectories on a structural mistake. Grading uses two workers:
+Pro images are multi-gigabyte and the Mac runs them under emulation.
+
+**Known unknowns going in.** Pro instances are larger (median gold patch ~6 KB vs
+~1 KB on Lite); the cap may bind (D14) and the whole-file-rewrite cost may bite harder
+(§2). The HF dataset's column casing differs between exports; `normalize()` accepts
+both. Image pull size for 30 instances is unmeasured; the smoke phase pulls one.
+
+351 tests pass, 22 new in `tests/test_bench.py`.

@@ -22,6 +22,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
+from . import bench as bench_mod
 from . import container as container_mod
 from . import audit, census, flowlog, inspect_run, sample, solver, transcript, version
 from .policy import ARMS
@@ -360,20 +361,44 @@ def _csv_ids(text: str | None) -> set[str]:
     return {x.strip() for x in (text or "").split(",") if x.strip()}
 
 
+def _bench_for(run_id: str) -> "bench_mod.Benchmark":
+    """The benchmark a run was solved on, from its sample.json (D27). Runs older than
+    D27 carry no `benchmark` key and are Lite."""
+    meta_path = RUNS_DIR / run_id / "sample.json"
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text())
+            return bench_mod.get(meta.get("benchmark", "lite"),
+                                 tuple(meta["repos"]) if meta.get("repos") else None)
+        except (json.JSONDecodeError, KeyError):
+            pass
+    return bench_mod.LITE
+
+
+def _eval_instance_dir(run_id: str, instance_id: str, bench=None) -> Path:
+    """Where the grader keeps one instance's output. Lite: the swebench layout.
+    Pro: `<run>/pro/<iid>/` written by swe_bench_pro_eval.py."""
+    bench = bench or _bench_for(run_id)
+    if bench.name == "pro":
+        return Path("logs/run_evaluation") / run_id / "pro" / instance_id
+    return Path("logs/run_evaluation") / run_id / MODEL_NAME / instance_id
+
+
 def _forget_evaluation(run_id: str, instance_ids: set[str]) -> int:
-    """Drop the official harness's per-instance log dir so `evaluate` re-grades a
-    retried trajectory instead of reusing the stale report.json (D23)."""
+    """Drop the grader's per-instance output so `evaluate` re-grades a retried
+    trajectory instead of reusing the stale result (D23)."""
     import shutil
     dropped = 0
     for iid in instance_ids:
-        d = Path("logs/run_evaluation") / run_id / MODEL_NAME / iid
+        d = _eval_instance_dir(run_id, iid)
         if d.exists():
             shutil.rmtree(d)
             dropped += 1
     return dropped
 
 
-async def _solve_all(instances, arm, run_dir: Path, args) -> list[dict]:
+async def _solve_all(instances, arm, run_dir: Path, args, bench=None) -> list[dict]:
+    bench = bench or bench_mod.LITE
     # Resume: a long run will be interrupted - docker hiccup, rate limit, laptop
     # sleep - and without this a single failure at instance 200 discards 200
     # trajectories. Only trajectories that actually ran commands are kept; a
@@ -441,6 +466,10 @@ async def _solve_all(instances, arm, run_dir: Path, args) -> list[dict]:
 
         cont = container_mod.InstanceContainer(
             instance_id=iid,
+            image=bench.image_for(inst),
+            repo_dir=bench.repo_dir,
+            run_extra=bench.docker_run_extra(),
+            run_cmd=bench.docker_run_cmd(),
             platform=args.platform,
             network_none=args.network_none,
             # D21: the harness owns every path its test patch touches.
@@ -519,11 +548,15 @@ def cmd_solve(args) -> int:
     run_dir = RUNS_DIR / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    repos = tuple(r.strip() for r in (getattr(args, "repos", None) or "").split(",") if r.strip()) or None
+    bench = bench_mod.get(getattr(args, "bench", "lite"), repos)
+    if bench.name == "pro" and args.dataset == sample.DATASET:
+        args.dataset = bench.dataset          # --dataset default is Lite's; follow --bench
     explicit = _csv_ids(getattr(args, "instances", None))
     if explicit:
         # D23: a hand-picked set for diagnosis. Not a sample - never pool it with the
         # seeded runs. `report` carries the flag so it cannot be mistaken for one.
-        pool = {i["instance_id"]: i for i in sample.load(args.dataset, args.split)}
+        pool = {i["instance_id"]: i for i in sample.load(args.dataset, args.split, bench)}
         unknown = sorted(explicit - set(pool))
         if unknown:
             print(f"unknown instance id(s): {', '.join(unknown)}", file=sys.stderr)
@@ -531,10 +564,17 @@ def cmd_solve(args) -> int:
         instances = [pool[i] for i in sorted(explicit)]
         sizes = sample.size_report(instances)
     else:
-        instances, sizes = sample.pick(args.n, args.dataset, args.split, args.seed)
+        instances, sizes = sample.pick(args.n, args.dataset, args.split, args.seed, bench)
+    # Pro rows are large (dockerfiles, run scripts); keep what the grader and the
+    # solver need so sample.json stays readable and the instances travel with the run.
+    keep_keys = ("instance_id", "repo", "base_commit", "problem_statement", "hints_text",
+                 "patch", "test_patch", "fail_to_pass", "pass_to_pass", "dockerhub_tag",
+                 "before_repo_set_cmd", "selected_test_files_to_run")
     meta = {
         "run_id": run_id, "arm": arm.name, "model": solver.MODEL,
+        "benchmark": bench.name, "repo_dir": bench.repo_dir, "repos": list(bench.repos),
         "dataset": args.dataset, "split": args.split, "seed": args.seed,
+        "instances": [{k: i[k] for k in keep_keys if k in i} for i in instances],
         "max_turns": args.max_turns,
         "instance_ids": [i["instance_id"] for i in instances],
         "gold_patch_sizes": sizes,
@@ -547,14 +587,16 @@ def cmd_solve(args) -> int:
     print(f"classifier: {meta['classifier_fingerprint']}")
     print(f"arm       : {arm.name} (mode={arm.mode})")
     print(f"model     : {solver.MODEL}")
+    print(f"benchmark : {bench.name} (repo at {bench.repo_dir}"
+          + (f", repos {', '.join(bench.repos)}" if bench.repos else "") + ")")
     print(f"instances : {len(instances)} across "
-          f"{len({sample.repo_of(i['instance_id']) for i in instances})} repos")
+          f"{len({i.get('repo') or sample.repo_of(i['instance_id']) for i in instances})} repos")
     print(f"gold patch: median {sizes['median_lines_touched']:.0f} lines, "
           f"{sizes['median_files']:.0f} files"
           + ("  ! degeneracy risk (§7)" if sizes["degeneracy_risk"] else ""))
     print()
 
-    trajectories = asyncio.run(_solve_all(instances, arm, run_dir, args))
+    trajectories = asyncio.run(_solve_all(instances, arm, run_dir, args, bench))
 
     predictions = [
         {"instance_id": t["instance_id"], "model_name_or_path": MODEL_NAME,
@@ -579,6 +621,52 @@ def cmd_solve(args) -> int:
 # evaluate
 # --------------------------------------------------------------------------
 
+def _pro_evaluate(run_id: str, ids: list[str], preds: list[dict], meta: dict,
+                  out_root: Path, *, max_workers: int, redo: bool) -> int:
+    """Grade with the Scale repo's script (D27). Writes the sampled rows as the
+    `raw_sample` JSONL it expects (lowercase list columns, stringified), the patches
+    as its `[{instance_id, patch, prefix}]` JSON, and runs it with cwd=PRO_ROOT
+    because it resolves `dockerfiles/` and `helper_code` relatively."""
+    root = bench_mod.PRO_ROOT
+    script = root / "swe_bench_pro_eval.py"
+    if not script.exists():
+        print(f"Pro grader not found at {script}; clone SWE-bench_Pro-os into the repo root",
+              file=sys.stderr)
+        return 1
+    by_id = {i["instance_id"]: i for i in meta.get("instances", [])}
+    run_dir = RUNS_DIR / run_id
+    rows_path = (run_dir / "pro_samples.jsonl").resolve()
+    with rows_path.open("w") as fh:
+        for iid in ids:
+            r = dict(by_id[iid])
+            r["fail_to_pass"] = json.dumps(r.get("fail_to_pass", []))
+            r["pass_to_pass"] = json.dumps(r.get("pass_to_pass", []))
+            if isinstance(r.get("selected_test_files_to_run"), list):
+                r["selected_test_files_to_run"] = json.dumps(r["selected_test_files_to_run"])
+            fh.write(json.dumps(r) + "\n")
+    patches_path = (run_dir / "pro_patches.json").resolve()
+    patches_path.write_text(json.dumps([
+        {"instance_id": p["instance_id"], "patch": p["model_patch"], "prefix": MODEL_NAME}
+        for p in preds if p["instance_id"] in set(ids)
+    ], indent=2))
+    out_root = out_root.resolve()
+    out_root.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        sys.executable, str(script.resolve()),
+        "--raw_sample_path", str(rows_path),
+        "--patch_path", str(patches_path),
+        "--output_dir", str(out_root),
+        "--scripts_dir", str((root / "run_scripts").resolve()),
+        "--dockerhub_username", bench_mod.PRO_DOCKERHUB_USER,
+        "--use_local_docker", "--docker_platform", container_mod.DEFAULT_PLATFORM,
+        "--num_workers", str(max_workers),
+    ]
+    if redo:
+        cmd.append("--redo")
+    print(" ".join(cmd), "\n")
+    return subprocess.run(cmd, cwd=str(root)).returncode
+
+
 def cmd_evaluate(args) -> int:
     run_dir = RUNS_DIR / args.run_id
     preds = run_dir / "predictions.json"
@@ -588,6 +676,15 @@ def cmd_evaluate(args) -> int:
     meta = json.loads((run_dir / "sample.json").read_text())
     ids = list(meta["instance_ids"])
     regrade = _csv_ids(getattr(args, "regrade", None))
+    bench = _bench_for(args.run_id)
+    if bench.name == "pro":
+        if regrade:
+            n = _forget_evaluation(args.run_id, regrade)
+            ids = sorted(regrade & set(ids))
+            print(f"regrade   : {len(ids)} instance(s), {n} stale output(s) removed (D26)")
+        return _pro_evaluate(args.run_id, ids, json.loads(preds.read_text()), meta,
+                             Path("logs/run_evaluation") / args.run_id / "pro",
+                             max_workers=args.max_workers, redo=bool(regrade))
     if regrade:
         # D26: re-grade the SAME patch. For instances whose tests depend on a live
         # service, the grade is a property of the service on the day, not of the
@@ -639,6 +736,34 @@ def cmd_envcheck(args) -> int:
     if getattr(args, "force", False):
         _forget_evaluation(ENVCHECK_RUN_ID, set(ids))
 
+    bench = _bench_for(args.run_id)
+    if bench.name == "pro":
+        # D27: same idea, Scale's grader. Baseline output lives under the source
+        # run-id's pro dir with an `envcheck` prefix so `_instance_report` can find it
+        # via a synthetic run-id; simplest is a sibling run-id per source run.
+        env_rid = f"{ENVCHECK_RUN_ID}-{args.run_id}"
+        (RUNS_DIR / env_rid).mkdir(parents=True, exist_ok=True)
+        (RUNS_DIR / env_rid / "sample.json").write_text(json.dumps(
+            {**meta, "run_id": env_rid, "instance_ids": ids}, indent=2))
+        started = time.time()
+        rc = _pro_evaluate(env_rid, ids,
+                           [{"instance_id": i, "model_patch": NOOP_PATCH} for i in ids],
+                           meta, Path("logs/run_evaluation") / env_rid / "pro",
+                           max_workers=args.max_workers, redo=bool(getattr(args, "force", False)))
+        baseline = load_baseline()
+        for iid in ids:
+            rep = _instance_report(env_rid, iid)
+            if rep is None:
+                print(f"  {iid:38s} no report (grader error?)")
+                continue
+            baseline = merge_baseline(baseline, iid, rep)
+            n = len(baseline[iid]["p2p_failures"])
+            print(f"  {iid:38s} P2P failing with no patch: {n}" + ("   <- environment" if n else ""))
+        ENVCHECK_DIR.mkdir(parents=True, exist_ok=True)
+        (ENVCHECK_DIR / "baseline.json").write_text(json.dumps(baseline, indent=2))
+        print(f"\nwrote {ENVCHECK_DIR / 'baseline.json'}; re-run `report` on affected run-ids")
+        return rc
+
     ENVCHECK_DIR.mkdir(parents=True, exist_ok=True)
     preds_path = ENVCHECK_DIR / "predictions.json"
     preds = {}
@@ -669,7 +794,7 @@ def cmd_envcheck(args) -> int:
         if rep is None:
             print(f"  {iid:38s} no report (harness error?)")
             continue
-        report_path = Path("logs/run_evaluation") / ENVCHECK_RUN_ID / MODEL_NAME / iid / "report.json"
+        report_path = _eval_instance_dir(ENVCHECK_RUN_ID, iid, bench_mod.LITE) / "report.json"
         if report_path.stat().st_mtime >= started:
             baseline = merge_baseline(baseline, iid, rep)
         elif iid not in baseline:
@@ -687,6 +812,21 @@ def cmd_envcheck(args) -> int:
 # --------------------------------------------------------------------------
 
 def _instance_report(run_id: str, instance_id: str) -> dict | None:
+    bench = _bench_for(run_id)
+    if bench.name == "pro":
+        d = _eval_instance_dir(run_id, instance_id, bench)
+        out = d / f"{MODEL_NAME}_output.json"
+        if not out.exists():
+            return None
+        try:
+            output = json.loads(out.read_text())
+        except Exception:
+            return None
+        stderr_path = d / f"{MODEL_NAME}_stderr.log"
+        stderr = stderr_path.read_text(errors="replace") if stderr_path.exists() else ""
+        meta = json.loads((RUNS_DIR / run_id / "sample.json").read_text())
+        inst = next((i for i in meta.get("instances", []) if i["instance_id"] == instance_id), {})
+        return bench_mod.pro_report(output, stderr, inst)
     base = Path("logs/run_evaluation") / run_id / MODEL_NAME / instance_id / "report.json"
     if not base.exists():
         return None
@@ -789,7 +929,10 @@ def cmd_report(args) -> int:
     print(f"classifier      : {', '.join(sorted(f for f in fps if f)) or 'unstamped'}")
     sample_meta = run_dir / "sample.json"
     if sample_meta.exists():
-        sel = json.loads(sample_meta.read_text()).get("selection", "stratified")
+        _m = json.loads(sample_meta.read_text())
+        sel = _m.get("selection", "stratified")
+        print(f"benchmark       : {_m.get('benchmark', 'lite')}"
+              + (f"  repos={','.join(_m['repos'])}" if _m.get("repos") else ""))
         if sel == "explicit":
             print("selection       : explicit   ! diagnostic set, not a sample - "
                   "do not pool with seeded runs (D23)")
@@ -1037,6 +1180,11 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--n", type=int, default=8)
     s.add_argument("--arm", default="arm0", choices=sorted(set(ARMS)))
     s.add_argument("--run-id", default=None)
+    s.add_argument("--bench", default="lite", choices=sorted(bench_mod.BENCHMARKS),
+                   help="D27: which benchmark profile - image naming, repo path, grader")
+    s.add_argument("--repos", default=None, metavar="owner/name,owner/name",
+                   help="D27: restrict the sample to these repos (Pro default: the two "
+                        "pytest repos, openlibrary and qutebrowser)")
     s.add_argument("--dataset", default=sample.DATASET)
     s.add_argument("--split", default=sample.SPLIT)
     s.add_argument("--seed", type=int, default=sample.SEED)

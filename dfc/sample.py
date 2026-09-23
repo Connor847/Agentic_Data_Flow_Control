@@ -27,9 +27,16 @@ def repo_of(instance_id: str) -> str:
     return instance_id.split("__", 1)[0] if "__" in instance_id else instance_id
 
 
-def load(dataset: str = DATASET, split: str = SPLIT) -> list[dict]:
+def load(dataset: str = DATASET, split: str = SPLIT, bench=None) -> list[dict]:
+    """Rows normalised to one shape (D27). `bench` defaults to the profile whose
+    dataset name matches, so old call sites keep working."""
     from datasets import load_dataset
-    return list(load_dataset(dataset, split=split))
+    from . import bench as bench_mod
+    if bench is None:
+        bench = next((b for b in bench_mod.BENCHMARKS.values() if b.dataset == dataset),
+                     bench_mod.LITE)
+    rows = [bench.normalize(r) for r in load_dataset(dataset, split=split)]
+    return [r for r in rows if bench.keep(r)]
 
 
 def stratified(instances: list[dict], n: int, seed: int = SEED) -> list[dict]:
@@ -41,7 +48,7 @@ def stratified(instances: list[dict], n: int, seed: int = SEED) -> list[dict]:
     """
     by_repo: dict[str, list[dict]] = defaultdict(list)
     for inst in instances:
-        by_repo[repo_of(inst["instance_id"])].append(inst)
+        by_repo[inst.get("repo") or repo_of(inst["instance_id"])].append(inst)
 
     rng = random.Random(seed)
     for repo in by_repo:
@@ -127,8 +134,8 @@ def size_report(instances: list[dict]) -> dict:
 
 
 def pick(n: int = 8, dataset: str = DATASET, split: str = SPLIT,
-         seed: int = SEED) -> tuple[list[dict], dict]:
-    instances = load(dataset, split)
+         seed: int = SEED, bench=None) -> tuple[list[dict], dict]:
+    instances = load(dataset, split, bench)
     chosen = stratified(instances, n, seed)
     return chosen, size_report(chosen)
 

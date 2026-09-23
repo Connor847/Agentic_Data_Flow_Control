@@ -271,3 +271,44 @@ Roughly 180 trajectories (2 arms × 3 seeds × n=30). Notes:
   outage must be captured on the day it affects the grade, D26); no `unchecked P2P`
   line in any report (D25)
 - No `Assuming -R` in any `run_instance.log` (D26: the patch carried image state)
+
+
+---
+
+## 10. SWE-bench Pro (D27)
+
+One-time setup, in the venv:
+
+```bash
+pip install docker pandas tqdm        # the Scale grader's imports
+ls SWE-bench_Pro-os/swe_bench_pro_eval.py SWE-bench_Pro-os/run_scripts | head -3
+docker system df                      # Pro images are large; want tens of GB free
+python -m dfc.run preflight && python -m dfc.run doctor
+```
+
+The pilot:
+
+```bash
+./run_pro_pilot.sh 2>&1 | tee pro-pilot.log
+```
+
+It runs a one-instance smoke (solve + grade) and stops if the container cannot start
+or the grader writes no output, then 2 arms × n=30 on the two pytest repos, then
+grade + envcheck + report + audit. Resume by re-running the same command.
+
+Per-command equivalents:
+
+```bash
+python -m dfc.run solve    --bench pro --n 30 --arm arm0 --seed 20260923 --max-turns 150 --run-id dfc-pro-arm0-s20260923
+python -m dfc.run evaluate --run-id dfc-pro-arm0-s20260923 --max-workers 2
+python -m dfc.run envcheck --run-id dfc-pro-arm0-s20260923 --max-workers 2
+python -m dfc.run report   --run-id dfc-pro-arm0-s20260923
+```
+
+`--bench pro` is needed only on `solve`; the run-id carries it afterwards. `--repos`
+widens the sample (`internetarchive/openlibrary,qutebrowser/qutebrowser,ansible/ansible`
+for all Python repos - but read D27 on why ansible is out of the pilot).
+
+Where Pro puts things: grader output under `logs/run_evaluation/<run-id>/pro/<iid>/`
+(`dfc-sonnet5_output.json`, `_stdout.log`, `_stderr.log`, `_patch.diff`); the rows and
+patches handed to the grader in `runs/<run-id>/pro_samples.jsonl` and `pro_patches.json`.

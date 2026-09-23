@@ -37,6 +37,7 @@ class _CwdSpy:
     def __init__(self, drift="/tmp/rxgtest"):
         self.container_id = "cid"
         self.workdir = container.TESTBED
+        self.repo_dir = container.TESTBED
         self.drift = drift
         self.seen: list[str] = []
         self.preexisting_dirty: list[str] = []

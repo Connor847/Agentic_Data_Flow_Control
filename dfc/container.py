@@ -141,6 +141,13 @@ class InstanceContainer:
     image: str = ""
     platform: str = DEFAULT_PLATFORM
     workdir: str = TESTBED
+    #: D27 - where the benchmark puts the checkout. Lite: /testbed. Pro: /app.
+    repo_dir: str = TESTBED
+    #: D27 - extra `docker run` flags and the container command. Pro images set
+    #: ENTRYPOINT ["/bin/bash"], so `sleep infinity` has to be passed as
+    #: `--entrypoint sleep` + `infinity` or bash tries to execute a file named sleep.
+    run_extra: list[str] = field(default_factory=list)
+    run_cmd: list[str] = field(default_factory=lambda: ["sleep", "infinity"])
     container_id: str = ""
     #: §6.4 - the envelope defaults. `--network none` makes egress impossible rather
     #: than merely bounded. Kept off by default in Phase 2 so `pip install` still works
@@ -186,7 +193,7 @@ class InstanceContainer:
             "docker", "run", "-d", "--rm",
             "--platform", self.platform,
             "--name", name,
-            "-w", TESTBED,
+            "-w", self.repo_dir,
             "--memory", self.memory,
             "--cpus", self.cpus,
             "--pids-limit", str(self.pids_limit),
@@ -195,12 +202,13 @@ class InstanceContainer:
         ]
         if self.network_none:
             args += ["--network", "none"]
-        args += [self.image, "sleep", "infinity"]
+        args += list(self.run_extra)
+        args += [self.image, *self.run_cmd]
         p = _run(args, timeout=600)
         if p.returncode != 0:
             raise DockerError(f"could not start container for {self.instance_id}:\n{p.stderr.strip()}")
         self.container_id = p.stdout.strip()
-        self.workdir = TESTBED
+        self.workdir = self.repo_dir
         self.snapshot_start_state()
         return self
 
@@ -255,7 +263,7 @@ class InstanceContainer:
         sentinel = "__DFC_CWD__"
         start_dir = workdir if workdir is not None else self.workdir
         wrapped = (
-            f"cd {shlex.quote(start_dir)} 2>/dev/null || cd {TESTBED}; "
+            f"cd {shlex.quote(start_dir)} 2>/dev/null || cd {shlex.quote(self.repo_dir)}; "
             f"{{ {command}\n}}; __rc=$?; printf '\\n{sentinel}%s\\n' \"$PWD\"; exit $__rc"
         )
         args = ["docker", "exec", "-i", self.container_id, "bash", "-lc", wrapped]
@@ -284,7 +292,7 @@ class InstanceContainer:
 
     def _repo_exec(self, command: str, timeout: int = 120) -> dict:
         """Run housekeeping against the repo, wherever the agent left its cwd (D19)."""
-        return self.exec(command, timeout=timeout, workdir=TESTBED, track_cwd=False)
+        return self.exec(command, timeout=timeout, workdir=self.repo_dir, track_cwd=False)
 
     def model_patch(self) -> str:
         """§8 R5: the patch is produced by `git diff` at the end of the trajectory, not

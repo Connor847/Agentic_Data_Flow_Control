@@ -114,16 +114,19 @@ Arm note: you may also edit in place with `sed -i`, restricted to address-scoped
 This avoids rewriting a whole file to change a few lines."""
 
 
-def system_prompt_for(arm) -> str:
+def system_prompt_for(arm, repo_dir: str = "/testbed") -> str:
     """§7 requires the arms differ in exactly one *intended* way. D12 makes the prompt a
     second deliberate difference, so it must be stated: the restricted arms are told
     what they may use, the baseline is not told anything it could not already do."""
     if arm.mode == "observe":
-        return SYSTEM_PROMPT
-    prompt = SYSTEM_PROMPT + RESTRICTED_PROMPT
-    if arm.allow_sed_inplace:
-        prompt += SED_PROMPT
-    return prompt
+        prompt = SYSTEM_PROMPT
+    else:
+        prompt = SYSTEM_PROMPT + RESTRICTED_PROMPT
+        if arm.allow_sed_inplace:
+            prompt += SED_PROMPT
+    # D27: the prompt names the checkout path; Pro puts it at /app. Byte-identical
+    # for Lite, so no condition changes there.
+    return prompt.replace("/testbed", repo_dir)
 
 USER_PROMPT = """Fix the following issue in the repository at /testbed.
 
@@ -184,11 +187,11 @@ class Trajectory:
         return d
 
 
-def _build_user_prompt(instance: dict, include_hints: bool) -> str:
+def _build_user_prompt(instance: dict, include_hints: bool, repo_dir: str = "/testbed") -> str:
     hints = ""
     if include_hints and instance.get("hints_text"):
         hints = f"\n<hints>\n{instance['hints_text']}\n</hints>\n"
-    return USER_PROMPT.format(
+    return USER_PROMPT.replace("/testbed", repo_dir).format(
         problem_statement=instance["problem_statement"].strip(),
         hints=hints,
     )
@@ -224,7 +227,7 @@ async def solve(
 
     options = ClaudeAgentOptions(
         model=MODEL,
-        system_prompt=system_prompt_for(arm),
+        system_prompt=system_prompt_for(arm, getattr(container, "repo_dir", "/testbed")),
         mcp_servers={bashtool.SERVER_NAME: server},
         allowed_tools=[bashtool.QUALIFIED],
         disallowed_tools=DISALLOWED,
@@ -242,7 +245,7 @@ async def solve(
     started = time.time()
     try:
         async with ClaudeSDKClient(options=options) as client:
-            await client.query(_build_user_prompt(instance, include_hints))
+            await client.query(_build_user_prompt(instance, include_hints, getattr(container, "repo_dir", "/testbed")))
             async for message in client.receive_response():
                 kind = type(message).__name__
                 if kind == "AssistantMessage":

@@ -75,23 +75,25 @@ class InstanceView:
 
 
 def _eval_report(run_id: str, instance_id: str) -> dict | None:
-    p = (Path("logs/run_evaluation") / run_id / MODEL_NAME / instance_id / "report.json")
-    if not p.exists():
-        return None
-    try:
-        data = json.loads(p.read_text())
-        return data.get(instance_id, data)
-    except Exception:
-        return None
+    # D27: benchmark-aware; run.py owns the dispatch.
+    from .run import _instance_report
+    return _instance_report(run_id, instance_id)
 
 
 def test_output(run_id: str, instance_id: str, limit: int = 4000) -> str:
-    """Raw harness test output - the ground truth on what failed."""
-    p = (Path("logs/run_evaluation") / run_id / MODEL_NAME / instance_id
-         / "test_output.txt")
-    if not p.exists():
-        return ""
-    txt = p.read_text(errors="replace")
+    """Raw grader test output - the ground truth on what failed."""
+    from .run import _eval_instance_dir, _bench_for
+    d = _eval_instance_dir(run_id, instance_id)
+    if _bench_for(run_id).name == "pro":
+        parts = []
+        for name in (f"{MODEL_NAME}_stdout.log", f"{MODEL_NAME}_stderr.log"):
+            f = d / name
+            if f.exists():
+                parts.append(f"--- {name} ---\n" + f.read_text(errors="replace"))
+        txt = "\n".join(parts)
+    else:
+        p = d / "test_output.txt"
+        txt = p.read_text(errors="replace") if p.exists() else ""
     return txt[-limit:] if len(txt) > limit else txt
 
 
