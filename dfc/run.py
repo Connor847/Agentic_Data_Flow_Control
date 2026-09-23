@@ -742,6 +742,15 @@ def cmd_envcheck(args) -> int:
         return 0
     if getattr(args, "force", False):
         _forget_evaluation(ENVCHECK_RUN_ID, set(ids))
+    if getattr(args, "reset", False):
+        # D28: a baseline taken while the hidden tests were not installed lists every
+        # P2P test as failing, and the union rule would keep that forever. Drop the
+        # named instances' entries before merging fresh ones.
+        b = load_baseline()
+        dropped = [i for i in ids if b.pop(i, None) is not None]
+        ENVCHECK_DIR.mkdir(parents=True, exist_ok=True)
+        (ENVCHECK_DIR / "baseline.json").write_text(json.dumps(b, indent=2))
+        print(f"reset     : dropped {len(dropped)} stale baseline entr{'y' if len(dropped)==1 else 'ies'}")
 
     bench = _bench_for(args.run_id)
     if bench.name == "pro":
@@ -1242,6 +1251,8 @@ def main(argv: list[str] | None = None) -> int:
     ec.add_argument("--instances", default=None, metavar="ID,ID")
     ec.add_argument("--force", action="store_true", help="re-evaluate even if a baseline "
                                                           "report exists (union the results)")
+    ec.add_argument("--reset", action="store_true", help="D28: drop the named instances' "
+                                                          "existing baseline entries first")
     ec.add_argument("--max-workers", type=int, default=4)
     ec.add_argument("--cache-level", default="env")
     ec.set_defaults(func=cmd_envcheck)
