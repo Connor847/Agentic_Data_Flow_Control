@@ -196,3 +196,64 @@ def test_real_pro_rows_normalize(tmp_path):
         assert r["fail_to_pass"] and isinstance(r["fail_to_pass"], list)
         assert r["base_commit"] and r["repo"].count("/") == 1
         assert bench.PRO.image_for(r).startswith("jefzda/sweap-images:")
+
+
+# --------------------------------------------------------------------------
+# D28 - the hidden tests must be installed by us, and the evidence read back
+# --------------------------------------------------------------------------
+
+import base64
+
+TEST_PATCH = "diff --git a/tests/t.py b/tests/t.py\n--- a/tests/t.py\n+++ b/tests/t.py\n@@ -1 +1 @@\n-x\n+y\n"
+
+
+def test_setup_line_is_one_line_and_round_trips_the_patch():
+    line = bench.pro_setup_line(TEST_PATCH)
+    assert "\n" not in line
+    b64 = line.split("echo ", 1)[1].split(" | base64", 1)[0]
+    assert base64.b64decode(b64).decode() == TEST_PATCH
+    assert "git status --porcelain > /workspace/dfc_after_model_patch.txt" in line
+    assert "git apply --verbose /workspace/dfc_test_patch.diff" in line
+    assert 'exit=$?' in line
+
+
+def test_setup_cmd_replaces_only_the_last_line():
+    row = {"before_repo_set_cmd": "git reset --hard abc\ngit clean -fd\ngit checkout abc\n"
+                                  "git apply --verbose /tests/test_patch.patch",
+           "test_patch": TEST_PATCH}
+    out = bench.pro_setup_cmd(row).split("\n")
+    assert out[:3] == ["git reset --hard abc", "git clean -fd", "git checkout abc"]
+    assert "/tests/test_patch.patch" not in out[-1] and "base64 -d" in out[-1]
+
+
+MODEL_PATCH = "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-x\n+y\n"
+
+
+def test_model_patch_applied_iff_its_files_are_dirty():
+    ok = bench.pro_report(_out(["t::f1", "t::f2", "t::p1", "t::p2"]), "", INST,
+                          model_status=" M src/a.py\n", test_apply_log="Applied patch tests/t.py cleanly.\nexit=0\n",
+                          model_patch=MODEL_PATCH)
+    assert ok["patch_successfully_applied"] and ok["resolved"]
+    refused = bench.pro_report(_out([]), "", INST, model_status="", test_apply_log="exit=0\n",
+                               model_patch=MODEL_PATCH)
+    assert refused["patch_successfully_applied"] is False and not refused["resolved"]
+
+
+def test_hidden_tests_not_installed_is_an_error_not_a_result():
+    """The first Pro pilot: 60 trajectories graded against the base commit's tests
+    because `/tests/test_patch.patch` does not exist in the DockerHub images. That
+    must surface as harness-error, never as 0/30 resolved."""
+    from dfc.run import classify_failure
+    r = bench.pro_report(_out(["t::p1", "t::p2"]), "", INST, model_status=" M src/a.py\n",
+                         test_apply_log="error: tests/t.py: No such file or directory\nexit=1\n",
+                         model_patch=MODEL_PATCH)
+    assert r["error"].startswith("hidden tests not installed")
+    assert not r["resolved"]
+    traj = {"instance_id": "i", "model_patch": MODEL_PATCH, "stop_reason": "success",
+            "tool_stats": {"calls": 5}}
+    assert classify_failure(traj, r, 0.0, False) == "harness-error"
+
+
+def test_empty_model_patch_counts_as_applied():
+    r = bench.pro_report(_out([]), "", INST, model_status="", test_apply_log="exit=0\n", model_patch="")
+    assert r["patch_successfully_applied"] is True

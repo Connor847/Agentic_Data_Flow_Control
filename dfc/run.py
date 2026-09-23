@@ -127,6 +127,8 @@ def classify_failure(traj: dict, report: dict | None, denial_rate: float,
         return "empty-patch"
     if report is None:
         return "harness-error"
+    if report.get("error"):
+        return "harness-error"          # D28: e.g. hidden tests not installed
     if report.get("resolved"):
         return "resolved"
     if not report.get("patch_successfully_applied", False):
@@ -639,6 +641,9 @@ def _pro_evaluate(run_id: str, ids: list[str], preds: list[dict], meta: dict,
     with rows_path.open("w") as fh:
         for iid in ids:
             r = dict(by_id[iid])
+            # D28: install the HF test patch ourselves; the rows' own last line names a
+            # file that is not in the DockerHub images.
+            r["before_repo_set_cmd"] = bench_mod.pro_setup_cmd(r)
             r["fail_to_pass"] = json.dumps(r.get("fail_to_pass", []))
             r["pass_to_pass"] = json.dumps(r.get("pass_to_pass", []))
             if isinstance(r.get("selected_test_files_to_run"), list):
@@ -676,6 +681,8 @@ def cmd_evaluate(args) -> int:
     meta = json.loads((run_dir / "sample.json").read_text())
     ids = list(meta["instance_ids"])
     regrade = _csv_ids(getattr(args, "regrade", None))
+    if regrade == {"all"}:
+        regrade = set(ids)          # D28: re-grade every trajectory in the run
     bench = _bench_for(args.run_id)
     if bench.name == "pro":
         if regrade:
@@ -826,7 +833,16 @@ def _instance_report(run_id: str, instance_id: str) -> dict | None:
         stderr = stderr_path.read_text(errors="replace") if stderr_path.exists() else ""
         meta = json.loads((RUNS_DIR / run_id / "sample.json").read_text())
         inst = next((i for i in meta.get("instances", []) if i["instance_id"] == instance_id), {})
-        return bench_mod.pro_report(output, stderr, inst)
+        ws = d / "workspace"
+        def _read(name):
+            f = ws / name
+            return f.read_text(errors="replace") if f.exists() else None
+        patch_file = d / f"{MODEL_NAME}_patch.diff"
+        model_patch = patch_file.read_text(errors="replace") if patch_file.exists() else ""
+        return bench_mod.pro_report(output, stderr, inst,
+                                    model_status=_read(bench_mod.PRO_MODEL_STATUS),
+                                    test_apply_log=_read(bench_mod.PRO_TEST_APPLY_LOG),
+                                    model_patch=model_patch)
     base = Path("logs/run_evaluation") / run_id / MODEL_NAME / instance_id / "report.json"
     if not base.exists():
         return None
@@ -1215,7 +1231,8 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--cache-level", default="env")
     e.add_argument("--regrade", default=None, metavar="ID,ID",
                    help="D26: discard these instances' harness reports and grade the "
-                        "same patches again (live-service flakiness)")
+                        "same patches again (live-service flakiness); 'all' for every "
+                        "instance in the run (D28)")
     e.set_defaults(func=cmd_evaluate)
 
     ec = sub.add_parser("envcheck", help="D25: evaluate instances with NO patch to learn "

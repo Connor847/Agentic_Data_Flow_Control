@@ -30,6 +30,13 @@ fi
 if [ ! -f logs/run_evaluation/dfc-pro-smoke/pro/*/dfc-sonnet5_output.json ]; then
   echo "smoke: grader produced no output.json - check logs/run_evaluation/dfc-pro-smoke/pro/*/"; exit 1
 fi
+# D28: the grade must have been of the HIDDEN tests, not the base commit's.
+if ! grep -q '^exit=0' logs/run_evaluation/dfc-pro-smoke/pro/*/workspace/dfc_test_apply.log 2>/dev/null; then
+  echo "smoke: hidden tests were not installed - see workspace/dfc_test_apply.log"; exit 1
+fi
+if grep -q 'harness-error' runs/dfc-pro-smoke/dfc_report.csv; then
+  echo "smoke: report has a harness-error row"; exit 1
+fi
 log "SMOKE PASSED"
 
 # ---------------------------------------------------------------------------

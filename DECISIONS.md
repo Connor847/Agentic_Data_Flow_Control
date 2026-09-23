@@ -1068,3 +1068,51 @@ Pro images are multi-gigabyte and the Mac runs them under emulation.
 both. Image pull size for 30 instances is unmeasured; the smoke phase pulls one.
 
 351 tests pass, 22 new in `tests/test_bench.py`.
+
+---
+
+## D28 — The Pro pilot graded the base commit's tests; the hidden tests were never installed (2026-09-23)
+
+The pilot ran clean — 60 trajectories, no cap-bound, no harness-error, zero
+high-severity audit findings, D20/D21 firing as designed (7 dirty images, 22–25
+collisions) — and scored **0/30 in both arms with 11–12 `environment-suspect` rows
+each**. That combination is the Phase 4 gate exactly: a near-zero baseline means the
+harness is broken, not the model. It was.
+
+**Cause.** The Scale entryscript installs the hidden tests by running the *last line*
+of the dataset row's `before_repo_set_cmd`. In the public HuggingFace rows that line
+is `git apply --verbose /tests/test_patch.patch`. The file exists in Scale's internal
+ECR images and not in the `jefzda/sweap-images` DockerHub images the local-docker path
+pulls. The apply failed, the entryscript has no `set -e`, the tests ran on the base
+commit, and — because git's output goes to the container's stdout, which the grader
+does not keep — nothing recorded it. The visible symptom was `collected 0 items` for
+a test file that "does not exist", and P2P failures reproducing with no patch, which
+D25 dutifully labelled environmental. The repo's own `helper_code/sweap_eval_full_v2.jsonl`
+(a July export) uses `git checkout <sha> -- <files>` instead, a commit that *is* in
+the images; but its FAIL/PASS lists differ from HF on all 30 sampled instances (HF
+removed outdated tests in February), so grading with it would score against the
+wrong test lists.
+
+**Decision.** The grader is handed a `before_repo_set_cmd` whose last line we write
+(`bench.pro_setup_line`). It carries the HF `test_patch` itself, base64 on one line,
+and applies it — so the tests graded are the tests the HF lists name. The same line
+first records `git status --porcelain` into `/workspace` (the only evidence of whether
+the *model* patch applied, since git's stdout is lost) and captures our own
+`git apply --verbose` output and exit code. `/workspace` is a bind mount, so both
+survive the container. `pro_report` reads them: model patch applied iff every file it
+touches is dirty in that status; hidden tests installed iff `exit=0`; anything else
+is `error`, which `classify_failure` now maps to `harness-error` ahead of every other
+label, so this class of failure can never again present as 0/30.
+
+**Nothing about the trajectories changes.** They were solved in the correct image at
+the correct commit with the correct prompt; only the grade was wrong. `evaluate
+--regrade all` (new) re-grades every instance; `run_pro_regrade.sh` does the three
+run-ids. Docker time only.
+
+**Why this was not caught by the smoke phase.** The smoke checked that a container
+starts, the grader runs and writes `output.json`. It did not check that the grade
+*could have been* anything but a failure. The runbook's Phase 4 gate ("Arm 0 near zero
+⇒ stop") is the check that caught it, one run later than a smarter smoke would have.
+The smoke now fails if `dfc_test_apply.log` is missing or non-zero.
+
+356 tests pass, five new.

@@ -17,6 +17,7 @@ Pro:   ScaleAI/SWE-bench_Pro, repo at /app, `jefzda/sweap-images:<tag>` images w
 from __future__ import annotations
 
 import ast
+import base64
 import json
 import re
 from dataclasses import dataclass, field
@@ -157,19 +158,64 @@ def get(name: str, repos: tuple[str, ...] | None = None) -> Benchmark:
     return b
 
 
+# -- Pro: install the hidden tests ourselves (D28) ------------------------------
+
+#: Files this line leaves in /workspace, which the Scale grader bind-mounts from the
+#: host, so they survive the container and can be read back for the report.
+PRO_MODEL_STATUS = "dfc_after_model_patch.txt"
+PRO_TEST_APPLY_LOG = "dfc_test_apply.log"
+
+
+def pro_setup_line(test_patch: str) -> str:
+    """The single shell line the Scale entryscript runs after applying the model patch
+    and before running the tests (it takes the LAST line of `before_repo_set_cmd`).
+
+    The public HF rows say `git apply --verbose /tests/test_patch.patch`, a file that
+    exists only in Scale's internal images - on the DockerHub images the hidden tests
+    were never installed, so every grade in the first pilot was of the base commit's
+    tests. This line carries the HF `test_patch` itself, base64 on one line, and
+    applies it. It also records `git status` first, which is the only evidence of
+    whether the *model* patch applied: the entryscript sends git's own output to the
+    container's stdout, which the grader does not keep.
+    """
+    b64 = base64.b64encode(test_patch.encode()).decode()
+    return (
+        f"git status --porcelain > /workspace/{PRO_MODEL_STATUS}; "
+        f"echo {b64} | base64 -d > /workspace/dfc_test_patch.diff; "
+        f"git apply --verbose /workspace/dfc_test_patch.diff > /workspace/{PRO_TEST_APPLY_LOG} 2>&1; "
+        f"echo \"exit=$?\" >> /workspace/{PRO_TEST_APPLY_LOG}"
+    )
+
+
+def pro_setup_cmd(row: dict) -> str:
+    """`before_repo_set_cmd` with the last line replaced by ours. The reset/clean/
+    checkout lines above it are kept verbatim; the entryscript only executes the last
+    line anyway, but the field stays readable."""
+    lines = (row.get("before_repo_set_cmd") or "").strip().split("\n")
+    keep = [l for l in lines[:-1]] if len(lines) > 1 else []
+    return "\n".join(keep + [pro_setup_line(row.get("test_patch", ""))])
+
+
 # -- Pro grader output -> the report shape the rest of dfc expects --------------
 
 _GIT_APPLY_ERR = re.compile(r"^error: .*(patch failed|does not apply|already exists|No such file)", re.M)
 
 
-def pro_report(output: dict | None, stderr: str, inst: dict) -> dict | None:
+def pro_report(output: dict | None, stderr: str, inst: dict, *,
+               model_status: str | None = None, test_apply_log: str | None = None,
+               model_patch: str = "") -> dict | None:
     """Turn `<prefix>_output.json` (flat `tests: [{name, status}]`) into the dict
     `classify_failure` reads: resolved, patch_successfully_applied, tests_status with
     FAIL_TO_PASS / PASS_TO_PASS success and failure lists.
 
-    `patch_successfully_applied` comes from the entryscript's `git apply -v` stderr:
-    the script has no `set -e`, so a failed apply still runs the tests on the base
-    commit and would otherwise look like an unfixed bug."""
+    Evidence, in order of preference (D28):
+    * `model_status` - `git status --porcelain` taken after the model patch, before
+      the tests were installed. The model patch applied iff every file it touches is
+      dirty there. An empty status with a non-empty patch means `git apply` refused.
+    * `test_apply_log` - our own `git apply --verbose` of the hidden tests, with its
+      exit code. Non-zero means the grade is of the wrong tests: `error`, not a result.
+    * `stderr` - the run script's stderr, kept as a weaker fallback.
+    """
     if output is None:
         return None
     passed = {t.get("name") for t in output.get("tests", []) if t.get("status") == "PASSED"}
@@ -180,12 +226,30 @@ def pro_report(output: dict | None, stderr: str, inst: dict) -> dict | None:
         "PASS_TO_PASS": {"success": [t for t in p2p if t in passed],
                          "failure": [t for t in p2p if t not in passed]},
     }
-    applied = not _GIT_APPLY_ERR.search(stderr or "")
-    resolved = applied and not ts["FAIL_TO_PASS"]["failure"] and not ts["PASS_TO_PASS"]["failure"]
-    return {"resolved": resolved, "patch_successfully_applied": applied, "tests_status": ts,
-            "tests_reported": len(output.get("tests", []))}
+    error = ""
+    if model_status is not None:
+        dirty = {l[3:].strip() for l in model_status.splitlines() if len(l) > 3}
+        touched = set(_DIFF_PATHS.findall(model_patch or ""))
+        applied = (not touched) or all(any(d == t or t.startswith(d) for d in dirty) for t in touched)
+    else:
+        applied = not _GIT_APPLY_ERR.search(stderr or "")
+    if test_apply_log is not None:
+        m = re.search(r"^exit=(\d+)", test_apply_log, re.M)
+        if m is None or m.group(1) != "0":
+            error = "hidden tests not installed: " + test_apply_log.strip().splitlines()[-2:][0][:200] \
+                if test_apply_log.strip() else "hidden tests not installed"
+    resolved = applied and not error and not ts["FAIL_TO_PASS"]["failure"] \
+        and not ts["PASS_TO_PASS"]["failure"]
+    out = {"resolved": resolved, "patch_successfully_applied": applied, "tests_status": ts,
+           "tests_reported": len(output.get("tests", []))}
+    if error:
+        out["error"] = error
+    return out
+
+
+_DIFF_PATHS = re.compile(r"^diff --git a/\S+ b/(\S+)$", re.M)
 
 
 __all__ = ["Benchmark", "Lite", "Pro", "LITE", "PRO", "BENCHMARKS", "get", "pro_image_tag",
-           "pro_report", "PRO_ROOT", "PRO_DOCKERHUB_USER", "PRO_PYTEST_REPOS",
-           "PRO_PYTHON_REPOS"]
+           "pro_report", "pro_setup_line", "pro_setup_cmd", "PRO_ROOT", "PRO_DOCKERHUB_USER",
+           "PRO_PYTEST_REPOS", "PRO_PYTHON_REPOS", "PRO_MODEL_STATUS", "PRO_TEST_APPLY_LOG"]
