@@ -824,6 +824,51 @@ def cmd_envcheck(args) -> int:
 
 
 # --------------------------------------------------------------------------
+# compare (D31): one row per instance across several run-ids
+# --------------------------------------------------------------------------
+
+def cmd_compare(args) -> int:
+    """Side-by-side failure classes for the same instances across arms. The dive
+    into 'how do the arms differ' starts here, then `inspect` per cell."""
+    import csv
+    rids = [r.strip() for r in args.run_ids.split(",") if r.strip()]
+    tables = {}
+    for rid in rids:
+        path = RUNS_DIR / rid / "dfc_report.csv"
+        if not path.exists():
+            print(f"no report for {rid}; run `report --run-id {rid}` first", file=sys.stderr)
+            return 1
+        tables[rid] = {r["instance_id"]: r for r in csv.DictReader(path.open())}
+    ids = sorted(set.intersection(*(set(t) for t in tables.values())))
+    short = {rid: rid.replace("dfc-", "").replace("-s20260923", "") for rid in rids}
+    abbrev = {"resolved": "OK", "applied-F2P-unfixed": "unfixed", "applied-broke-P2P": "brokeP2P",
+              "environment-suspect": "env", "rewrite-infidelity": "rewrite", "harness-error": "HARNESS",
+              "blocked-tool-deadlock": "deadlock", "turn-limit": "CAP", "empty-patch": "empty",
+              "empty-patch-after-success": "empty!", "patch-malformed": "malformed"}
+    w = max(len(short[r]) for r in rids) + 2
+    print(f"{'instance':46s}" + "".join(f"{short[r]:>{max(w,24)}s}" for r in rids))
+    for iid in ids:
+        cells = []
+        for rid in rids:
+            r = tables[rid][iid]
+            cells.append(f"{abbrev.get(r['failure_class'], r['failure_class'])} "
+                         f"t{r['turns']} d{r['denied']} {int(r['patch_bytes'])//1000}k")
+        label = iid[len("instance_"):] if iid.startswith("instance_") else iid
+        print(f"{label[:46]:46s}" + "".join(f"{c:>{max(w,24)}s}" for c in cells))
+    print()
+    for rid in rids:
+        t = tables[rid]
+        n = sum(1 for i in ids if t[i]["failure_class"] == "resolved")
+        print(f"{short[rid]:24s} resolved {n}/{len(ids)}   turns {sum(int(t[i]['turns']) for i in ids)}"
+              f"   denied {sum(int(t[i]['denied']) for i in ids)}")
+    if len(rids) >= 2:
+        a, b = rids[0], rids[1]
+        only_a = [i for i in ids if tables[a][i]["failure_class"] == "resolved" != (tables[b][i]["failure_class"] == "resolved")]
+        print(f"\ndiscordant {short[a]} vs {short[b]}: {len(only_a)} instance(s)")
+    return 0
+
+
+# --------------------------------------------------------------------------
 # report
 # --------------------------------------------------------------------------
 
@@ -1256,6 +1301,10 @@ def main(argv: list[str] | None = None) -> int:
     ec.add_argument("--max-workers", type=int, default=4)
     ec.add_argument("--cache-level", default="env")
     ec.set_defaults(func=cmd_envcheck)
+
+    cp = sub.add_parser("compare", help="D31: per-instance failure classes across run-ids")
+    cp.add_argument("--run-ids", required=True, metavar="ID,ID,ID")
+    cp.set_defaults(func=cmd_compare)
 
     r = sub.add_parser("report", help="join results into dfc_report.csv")
     r.add_argument("--run-id", required=True)
