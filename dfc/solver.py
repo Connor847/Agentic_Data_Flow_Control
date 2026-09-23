@@ -110,7 +110,9 @@ The quoted delimiter (`<<'EOF'`, not `<<EOF`) matters: it stops the shell expand
 SED_PROMPT = """
 
 Arm note: you may also edit in place with `sed -i`, restricted to address-scoped \
-`s///`, `d`, `i` and `a` commands - for example `sed -i '42s/old/new/' path/to/file.py`. \
+`s///`, `d`, `i`, `a` and `c` commands - for example `sed -i '42s/old/new/' path/to/file.py` \
+to substitute, or `sed -i '40,48c\\
+<replacement lines>' path/to/file.py` to replace a block of lines. \
 This avoids rewriting a whole file to change a few lines."""
 
 

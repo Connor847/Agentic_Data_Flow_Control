@@ -1116,3 +1116,37 @@ starts, the grader runs and writes `output.json`. It did not check that the grad
 The smoke now fails if `dfc_test_apply.log` is missing or non-zero.
 
 356 tests pass, five new.
+
+---
+
+## D29 — `sed c` admitted; fingerprint moves to `10c5e789bf69` (2026-09-24)
+
+Open since D17. `c` (change) replaces the addressed lines with a literal text block. It
+is `d` followed by `i` at the same address: same file, same range, same verb
+(write-int), and the same D17 text-block handling — everything after `c\` is
+replacement text, not commands, so a `w` or `r` inside it is not an escape. Nothing
+but the plan's original four-command table kept it out, and admitting `s`, `d`, `i`,
+`a` while denying their composition had no principled defence.
+
+**Decision.** `c` joins `_SED_ALLOWED_COMMANDS`. An address is required, as for `i`
+and `a` and as for `d` under `sed_require_address_for_delete`: an unaddressed `c`
+replaces every line of the file. The Arm 1 prompt block shows the form. The no-editor
+ablation (`allow_sed_inplace=False`) still denies it.
+
+**What it is not.** It is not a lever on the Pro gap. Of the 44 `sed` denials in the
+Pro Arm 1 log, **6** were `c` forms. **31** were the agent reading line ranges through
+a pipeline — `grep -n "" f | sed -n '1193,1240p'` — which is a *read*, not an edit,
+and which the canon already rewrites to `awk 'NR>=A&&NR<=B'` when `sed -n` has a file
+operand but not when it reads stdin. That is the actual source of `sed` denials on
+Pro, it is a canonicalisation gap rather than a policy question, and it gets its own
+entry when fixed (the rewrite is exact: `sed -n 'A,Bp'` on a stream is `awk
+'NR>=A&&NR<=B'` on the same stream). The remaining 7 are `q`, `o`, `t` and mixed
+forms, correctly outside the subset.
+
+**Fingerprint** `76f60a616dbb` → `10c5e789bf69`. The Pro pilot (one seed) and every
+Lite run stay on their own fingerprints; nothing is re-run for this. This is the first
+entry in the pre-experiment batch; the stream-`sed` rewrite and whatever the Pro
+failure triage adds should land before the fingerprint is frozen, so it moves once
+more at most.
+
+361 tests pass, six new; one D17 case moved from "denied" to "passthrough".

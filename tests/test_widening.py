@@ -256,11 +256,54 @@ def test_insert_still_requires_an_address():
     ("w /tmp/out", "w"),
     ("r /etc/passwd", "r"),
     ("1e date", "e"),
-    ("11,15c\\\nnew", "c"),
 ])
 def test_escape_hatches_still_denied_after_the_fix(script, needle):
     d = classify(f"sed -i '{script}' f.py", ARM1)
     assert d.outcome is Outcome.DENIED
+
+
+# --------------------------------------------------------------------------
+# D29 - `c` (change) is admitted: it is `d` then `i` at the same address
+# --------------------------------------------------------------------------
+
+def test_addressed_change_is_a_passthrough_write():
+    d = classify("sed -i '11,15c\\\nnew line one\\\nnew line two' f.py", ARM1)
+    assert d.outcome is Outcome.PASSTHROUGH
+    written = [t.value for a in d.actions if a.verb is Verb.WRITE for t in a.targets]
+    assert written == ["f.py"]
+
+
+def test_change_by_regex_address_is_admitted():
+    d = classify("sed -i '/^def old/c\\\ndef new(self):' f.py", ARM1)
+    assert d.outcome is Outcome.PASSTHROUGH
+
+
+def test_change_text_containing_sed_syntax_is_text():
+    """Same D17 rule as `a`/`i`: everything after `c\\` is the replacement, not
+    commands, so a `w` or `r` inside it is not an escape."""
+    d = classify("sed -i '3c\\\nwrite to w /tmp/x; then r /etc/passwd' f.py", ARM1)
+    assert d.outcome is Outcome.PASSTHROUGH
+
+
+def test_unaddressed_change_is_denied():
+    """`sed -i 'c\\\ntext' f` replaces EVERY line with the text - the same hazard as an
+    unaddressed `d`, and denied on the same grounds."""
+    d = classify("sed -i 'c\\\ntext' f.py", ARM1)
+    assert d.outcome is Outcome.DENIED
+    assert "address" in d.reason
+
+
+def test_change_is_still_denied_in_the_no_editor_ablation():
+    from dfc.policy import Arm
+    no_editor = Arm(name="arm1-noeditor", mode="enforce",
+                    primitives=frozenset(ARM1.primitives - {"sed"}), allow_sed_inplace=False)
+    d = classify("sed -i '11,15c\\\nnew' f.py", no_editor)
+    assert d.outcome is Outcome.DENIED
+
+
+def test_arm1_prompt_mentions_change():
+    from dfc.solver import system_prompt_for
+    assert "`c`" in system_prompt_for(ARM1)
 
 
 def test_unaddressed_delete_still_denied():

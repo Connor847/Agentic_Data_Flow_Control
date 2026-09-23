@@ -201,9 +201,11 @@ _SED_ADDRESS = re.compile(
     r"\s*!?\s*"
 )
 
-_SED_ALLOWED_COMMANDS = frozenset({"s", "d", "i", "a"})
+#: D29 - `c` (change) admitted. It is `d` followed by `i` at the same address: same
+#: target, same verb, no escape surface the other four lack. D17 flagged it as the
+#: strongest remaining candidate; nothing but the plan's original table kept it out.
+_SED_ALLOWED_COMMANDS = frozenset({"s", "d", "i", "a", "c"})
 #: Commands whose argument is a block of literal text rather than more sed syntax.
-#: `c` is listed so it is rejected by name rather than by mis-parsing its text.
 _SED_TEXT_COMMANDS = frozenset({"a", "i", "c"})
 #: The commands that make sed fail the admission criterion outright.
 _SED_FORBIDDEN_COMMANDS = frozenset({"r", "R", "w", "W", "e", "F", "v"})
@@ -247,7 +249,7 @@ def _split_sed_script(script: str) -> list[str]:
 
 
 def sed_admissible(script: str, argv: list[str], arm: Arm) -> tuple[bool, str]:
-    """Arm 1 (D18): `sed -i` restricted to address-scoped `s///`, `d`, `i`, `a`.
+    """Arm 1 (D18, D29): `sed -i` restricted to address-scoped `s///`, `d`, `i`, `a`, `c`.
 
     Rejects sed's escape hatches outright: `r`/`R` (read an unlisted file),
     `w`/`W` (write an unlisted file), `e` and the `s///e` flag (execute), `F`.
@@ -278,8 +280,9 @@ def sed_admissible(script: str, argv: list[str], arm: Arm) -> tuple[bool, str]:
                 return False, (f"sed command `{cmd}` is outside the scoped subset "
                                f"({', '.join(sorted(_SED_ALLOWED_COMMANDS))})")
             if not had_address:
-                return False, (f"sed `{cmd}` needs an address saying where to insert; "
-                               "an unaddressed insert applies to every line")
+                what = "replace" if cmd == "c" else "insert"
+                return False, (f"sed `{cmd}` needs an address saying where to {what}; "
+                               f"an unaddressed `{cmd}` applies to every line")
             return True, ""   # everything after this point is text, not commands
         if cmd in _SED_FORBIDDEN_COMMANDS:
             return False, (
@@ -287,7 +290,7 @@ def sed_admissible(script: str, argv: list[str], arm: Arm) -> tuple[bool, str]:
                 "on the command line"
             )
         if cmd not in _SED_ALLOWED_COMMANDS:
-            return False, f"sed command `{cmd}` is outside the scoped subset (s, d, i, a)"
+            return False, f"sed command `{cmd}` is outside the scoped subset (s, d, i, a, c)"
         if cmd == "s":
             flags = _sed_s_flags(body)
             if "e" in flags:
