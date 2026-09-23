@@ -11,9 +11,12 @@ import pytest
 from dfc import canon
 
 
-def test_fifty_six_rules():
-    """The source of truth is `big ballin - Sheet6.csv`, 56 rules."""
-    assert len(canon.RULES) == 56
+def test_rule_count():
+    """The source of truth is `big ballin - Sheet6.csv`, 56 rules. D30 added two
+    forms of the same CSV row (7, sed range read): the stream form and the
+    single-line form. They carry the CSV row number, not a new one."""
+    assert len(canon.RULES) == 58
+    assert sum(1 for r in canon.RULES if r.csv_row == 7) == 3
 
 
 def test_rule_names_unique():
@@ -28,8 +31,8 @@ def test_csv_provenance_preserved():
 
 def test_bucket_histogram_stable():
     assert canon.bucket_histogram() == {
-        "python3-c": 6, "curl": 9, "grep": 9, "tee": 9, "ls": 7, "awk": 10,
-        "non-flow": 6,
+        "python3-c": 6, "curl": 9, "grep": 11, "tee": 9, "ls": 7, "awk": 10,
+        "non-flow": 6,   # grep 9 -> 11: D30 stream/single-line sed reads
     }
 
 
@@ -143,3 +146,35 @@ def test_unflagged_cat_still_rewrites(cmd, expected):
 def test_cat_n_still_goes_to_cat_numbered():
     out, rule = _canon("cat -n f.py")
     assert out == 'grep -n "" f.py' and rule.name == "cat_numbered"
+
+
+# --------------------------------------------------------------------------
+# D30 - sed -n line-range reads on a pipeline are rewritten, not denied
+# --------------------------------------------------------------------------
+
+import pytest as _pytest30
+
+
+@_pytest30.mark.parametrize("cmd,expected", [
+    ("sed -n '10,20p'", "awk 'NR>=10&&NR<=20'"),
+    ('sed -n "10,20p"', "awk 'NR>=10&&NR<=20'"),
+    ("sed -n '10,$p'", "awk 'NR>=10'"),
+    ("sed -n '15p'", "awk 'NR==15'"),
+    ("sed -n '15p' f.py", "awk 'NR==15' f.py"),
+    ("sed -n '10,$p' f.py", "awk 'NR>=10' f.py"),
+    ("sed -n '10,20p' f.py", "awk 'NR>=10&&NR<=20' f.py"),
+])
+def test_sed_range_forms_fold_onto_awk(cmd, expected):
+    out, rule = canon.canonicalize(cmd)
+    assert out == expected and rule.csv_row == 7, (out, rule)
+
+
+@_pytest30.mark.parametrize("cmd", [
+    "sed -n '10,20s/a/b/p'",          # substitute-and-print, not a range read
+    "sed -n '/start/,/end/p'",        # regex addresses: not statically bounded
+    "sed -i '10,20p' f.py",           # in-place is an edit, policy's job
+    "sed -n '10,20p' f.py g.py",      # two files: grep would prefix; leave to policy
+])
+def test_non_range_sed_is_left_alone(cmd):
+    out, rule = canon.canonicalize(cmd)
+    assert rule is None or rule.csv_row != 7, (out, rule)

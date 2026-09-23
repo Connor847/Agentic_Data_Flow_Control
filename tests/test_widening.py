@@ -308,3 +308,82 @@ def test_arm1_prompt_mentions_change():
 
 def test_unaddressed_delete_still_denied():
     assert classify("sed -i 'd' f.py", ARM1).outcome is Outcome.DENIED
+
+
+# --------------------------------------------------------------------------
+# D31 - Arm 2: same policy as Arm 1, playbook prompt. The prompt must be TRUE.
+# --------------------------------------------------------------------------
+
+from dfc.policy import ARM2, ARMS
+from dfc.solver import PLAYBOOK_PROMPT
+
+
+def test_arm2_policy_is_byte_identical_to_arm1():
+    for f in ("mode", "primitives", "allow_sed_inplace", "allow_rewrite",
+              "sed_require_address_for_delete"):
+        assert getattr(ARM2, f) == getattr(ARM1, f), f
+    assert ARM2.prompt_profile == "playbook" and ARM1.prompt_profile == "informed"
+    assert ARMS["arm2"] is ARM2 and ARM2.name == "arm2-playbook"
+
+
+def test_arm2_prompt_is_arm1_prompt_plus_playbook():
+    p1, p2 = system_prompt_for(ARM1), system_prompt_for(ARM2)
+    assert p2.startswith(p1) and p2 == p1 + PLAYBOOK_PROMPT
+    assert PLAYBOOK_PROMPT not in system_prompt_for(ARM0)
+
+
+#: Every command the playbook recommends. Each must be allowed or rewritten - never
+#: denied - under Arm 2, or the prompt is sending the model into refusals.
+RECOMMENDED = [
+    'grep -rn "def X\\|class X" src/', 'grep -rln "X" .', "ls -la path/", "ls -R path/",
+    'grep -c "" path', 'grep -n "" path', "awk 'NR>=10&&NR<=20' path", 'grep -m 5 "" path',
+    'grep -n -B3 -A10 "pattern" path',
+    "sed -i '12s/old/new/' path", "sed -i '10,12d' path",
+    "sed -i '12i\\\nnew text' path", "sed -i '12a\\\nnew text' path",
+    "sed -i '10,12c\\\nreplacement' path",
+    "tee path <<'EOF'\nx\nEOF", "tee -a path <<'EOF'\nx\nEOF",
+    "git diff --stat", "git status", "git diff", "git checkout -- path", "git stash",
+    "python -m pytest tests/test_x.py -x -q", "python -m pytest tests/test_x.py::TestX::test_y -q",
+    "ls -R . | grep X", 'grep -rl "" --include=X .', "awk 'NR>=10' path",
+    "tee path </dev/null", "echo hi", "cd src && ls", "pwd",
+    "ls -R . | grep foo | awk '{print $1}'",
+]
+
+
+@pytest.mark.parametrize("cmd", RECOMMENDED)
+def test_every_recommended_command_is_admitted(cmd):
+    d = classify(cmd, ARM2)
+    assert d.outcome in (Outcome.PASSTHROUGH, Outcome.REWRITTEN), (cmd, d.reason)
+
+
+#: Every command the playbook says is refused. Each must in fact be denied (or
+#: rewritten to something allowed - a rewrite is not a refusal the model sees).
+SAID_REFUSED = [
+    'python3 -c "print(1)"', "python script.py", "python3 script.py",
+    "sed -i '1w /tmp/x' path", "sed -i '1r /etc/passwd' path", "sed -i '1e date' path",
+    "sed -i '5q' path", "git log -3", "git show HEAD", "git blame path", "git grep foo",
+    "mkdir -p d", "touch f", "rm f", "mv a b", "chmod +x f", "xargs grep foo", 'printf "a\\n"',
+    "env", "which python", "date", "pip install x",
+    "awk '{system(\"ls\")}' f", "awk '{getline x < \"f\"}' f", "awk '{print > \"out\"}' f",
+]
+
+
+@pytest.mark.parametrize("cmd", SAID_REFUSED)
+def test_every_command_said_refused_is_refused(cmd):
+    d = classify(cmd, ARM2)
+    assert d.outcome is Outcome.DENIED, (cmd, d.outcome, d.updated_command)
+
+
+@pytest.mark.parametrize("cmd,expected_prefix", [
+    ("find . -name X", None),                       # denied; playbook gives a substitute
+    ("cat path", 'grep "" path'),                   # folded, as the playbook says
+    ("head -5 path", 'grep -m 5 "" path'),
+    ("wc -l path", 'grep -c "" path'),
+    ("sed -n '10,20p' path", "awk 'NR>=10&&NR<=20' path"),
+])
+def test_playbook_substitutions_match_what_the_hook_does(cmd, expected_prefix):
+    d = classify(cmd, ARM2)
+    if expected_prefix is None:
+        assert d.outcome is Outcome.DENIED
+    else:
+        assert d.outcome is Outcome.REWRITTEN and d.updated_command.startswith(expected_prefix)

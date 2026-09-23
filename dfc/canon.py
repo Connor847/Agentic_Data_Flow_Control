@@ -173,11 +173,26 @@ RULES: list[Rule] = [
          lambda m: "grep -R %s" % m.group("rest"), "Verified",
          "Decomposes to ls (enumerate) + grep (read)."),
     Rule("sed_range_read", 7, "grep", "READ", "MED", True,
-         _rx(r"^sed\s+-n\s+'?(?P<a>\d+),(?P<b>\d+)p'?\s+(?P<f>\S+)"),
-         lambda m: "awk 'NR>=%s&&NR<=%s' %s"
-                   % (m.group("a"), m.group("b"), m.group("f")), "Verified",
+         _rx(r"^sed\s+-n\s+['\"]?(?P<a>\d+),(?P<b>\d+|\$)p['\"]?\s+(?P<f>\S+)\s*$"),
+         lambda m: ("awk 'NR>=%s&&NR<=%s' %s" % (m.group("a"), m.group("b"), m.group("f"))
+                    if m.group("b") != "$" else
+                    "awk 'NR>=%s' %s" % (m.group("a"), m.group("f"))), "Verified",
          "awk slice reproduces the range; READ mode only (no -i).",
          target_bucket="awk"),
+    # D30: the same read on a pipeline. `grep -n "" f | sed -n '10,20p'` is the agent's
+    # most common line-range idiom under the restriction (31 of 44 sed denials in the
+    # Pro pilot) and the file form above was already rewritten; without a file operand
+    # the rule did not match and the whole line was denied. The awk slice is exact on
+    # a stream too; awk with no file reads stdin, which D11 already admits.
+    Rule("sed_range_stream", 7, "grep", "READ", "MED", True,
+         _rx(r"^sed\s+-n\s+['\"]?(?P<a>\d+),(?P<b>\d+|\$)p['\"]?\s*$"),
+         lambda m: ("awk 'NR>=%s&&NR<=%s'" % (m.group("a"), m.group("b"))
+                    if m.group("b") != "$" else "awk 'NR>=%s'" % m.group("a")), "Verified",
+         "awk slice reproduces the range on stdin.", target_bucket="awk"),
+    Rule("sed_line_read", 7, "grep", "READ", "MED", True,
+         _rx(r"^sed\s+-n\s+['\"]?(?P<a>\d+)p['\"]?(?:\s+(?P<f>\S+))?\s*$"),
+         lambda m: "awk 'NR==%s'%s" % (m.group("a"), (" " + m.group("f")) if m.group("f") else ""),
+         "Verified", "single-line print; file or stdin.", target_bucket="awk"),
     Rule("binary_dump", 8, "grep", "READ", "MED", True,
          _rx(r"^(od|xxd|strings)\s+(?P<f>\S+)"),
          lambda m: 'python3 -c \'import sys;sys.stdout.buffer.write('

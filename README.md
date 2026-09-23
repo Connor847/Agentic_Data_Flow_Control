@@ -36,7 +36,9 @@ the finding. Resolve rate alone is not.
 | **0 — baseline** | Unrestricted shell. The classifier runs in observe-only mode: it parses, classifies and logs, but never blocks or rewrites | Control, and the source of the natural command distribution |
 | **1 — primitives** | `ls`, `grep`, `curl`, `tee`/`>`, restricted `awk`, `head`/`tail` on a pipe, address-scoped `sed -i` (`s///`, `d`, `i`, `a`), plus a fixed infrastructure allowlist | The restriction |
 
-A third arm — Arm 1 without the in-place editor — was retired in **D18** when scoped
+| **2 — playbook** | Arm 1's policy exactly, plus a system prompt with the guardrails, recipes by edit size, and a refusal → substitute map (D31) | Prices unfamiliarity: the Arm 1 → Arm 2 delta is instruction only |
+
+An earlier Arm 2 — Arm 1 without the in-place editor — was retired in **D18** when scoped
 `sed -i` moved into Arm 1. It priced the whole-file-rewrite tax, which is consequently
 no longer measured; `Arm(allow_sed_inplace=False)` reconstructs it if that number is
 wanted back.

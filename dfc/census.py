@@ -76,8 +76,13 @@ def collect(runs_dir: Path = Path("runs"), *, arms: set[str] | None = None
     from .classifier import parse_commands
 
     out: dict[str, ArmCensus] = defaultdict(lambda: ArmCensus(arm=""))
+    from .policy import ARMS
     for log in sorted(runs_dir.glob("*/flow_log.jsonl")):
         arm = _arm_of(log.parent)
+        if arm not in ARMS:
+            # D31: a retired arm (e.g. `arm2-scoped-sed`, D18) shares a prefix with a
+            # live one; counting it would merge two different conditions.
+            continue
         key = arm.split("-")[0]
         if arms and key not in arms:
             continue

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SWE-bench Pro pilot (D27): 2 arms x n=30, one seed, Python pytest repos only.
+# SWE-bench Pro pilot (D27, D31): 3 arms x n=30, one seed, Python pytest repos only.
 #
 # Overnight-shaped: a smoke phase that fails fast on anything structural (image pull,
 # entrypoint, repo path, grader invocation) BEFORE the 60 quota-costing trajectories,
@@ -42,7 +42,7 @@ log "SMOKE PASSED"
 # ---------------------------------------------------------------------------
 # Phase 1 - solve, both arms, same seed (paired). Costs quota.
 # ---------------------------------------------------------------------------
-for arm in arm0 arm1; do
+for arm in arm0 arm1 arm2; do
   log "SOLVE dfc-pro-${arm}-s${SEED}"
   python -m dfc.run solve --bench pro --repos "$REPOS" --n "$N" --arm "$arm" --seed "$SEED" \
     --max-turns "$CAP" --run-id "dfc-pro-${arm}-s${SEED}"
@@ -51,7 +51,7 @@ done
 # ---------------------------------------------------------------------------
 # Phase 2 - grade, envcheck in the same pass (D26), report, audit.
 # ---------------------------------------------------------------------------
-for arm in arm0 arm1; do
+for arm in arm0 arm1 arm2; do
   rid="dfc-pro-${arm}-s${SEED}"
   log "EVALUATE ${rid}"
   python -m dfc.run evaluate --run-id "$rid" --max-workers "$WORKERS"

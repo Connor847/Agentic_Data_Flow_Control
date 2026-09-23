@@ -1150,3 +1150,67 @@ failure triage adds should land before the fingerprint is frozen, so it moves on
 more at most.
 
 361 tests pass, six new; one D17 case moved from "denied" to "passthrough".
+
+---
+
+## D30 — Stream `sed -n 'A,Bp'` is a read and is folded onto `awk` (2026-09-24)
+
+Found while checking D29's premise. Of the 44 `sed` denials in the Pro Arm 1 log, 31
+were one idiom: `grep -n "" f | sed -n '1193,1240p'` — the agent numbering a file
+and cutting a line range out of the stream. It is a read. The canon has folded the
+file form (`sed -n 'A,Bp' f` → `awk 'NR>=A&&NR<=B' f`, CSV row 7) since the table
+was ported; the regex required a file operand, so the stdin form fell through to the
+classifier, which correctly refuses stream `sed` as not a primitive, and the whole
+line was denied. The agent then spent turns finding another way to see the same
+lines, thirty-one times in thirty trajectories.
+
+**Decision.** Two more forms of CSV row 7: `sed -n 'A,Bp'` with no operand →
+`awk 'NR>=A&&NR<=B'` (awk with no file reads stdin, which D11 admits), and the
+single-line `sed -n 'Np'` with or without a file → `awk 'NR==N'`. `$` as the
+range end is accepted in all forms (`awk 'NR>=A'`). The rewrite is exact. Regex
+addresses (`/start/,/end/p`), `s///p`, multiple files and `-i` are left alone.
+Rule count 56 → 58; the two carry row 7, not new rows.
+
+Fingerprint moves with D31 below.
+
+---
+
+## D31 — Arm 2: Arm 1's policy with a playbook prompt (2026-09-24)
+
+D12 already gives Arm 1 a table of permitted commands. The Pro pilot's Arm 1 losses
+are not tool-starved (denial rates 7–18%), but the escape list — `python` 40, `sed`
+44, `cat` 21, `git` 21, `find` 19 — shows the agent repeatedly reaching for things
+it was told it does not have, and then spending turns recovering. Whether the
+restriction's cost comes from the primitive set or from the model's *unfamiliarity*
+with working inside it is a question the two-arm design cannot answer.
+
+**Decision.** A third arm, `arm2-playbook`, whose policy is Arm 1's field for field
+(the test pins this) and whose system prompt is Arm 1's plus a playbook: the
+guardrails stated once (checked / folded / refused; a refusal costs a turn, not the
+file), preferred operations by task (finding, reading, editing by size of change,
+testing), and a refusal → substitute table for every command the pilot saw the agent
+reach for. `Arm` gains `prompt_profile`; the classifier never reads it.
+
+**The prompt is tested against the gate.** Every command the playbook recommends is
+asserted to be allowed or folded under Arm 2 (31 forms), and every command it says is
+refused is asserted to be refused (25 forms). A playbook that told the model to use
+something the hook then denies would be worse than no playbook.
+
+**What the arms now isolate.** Arm 0 → Arm 1: the restriction, as D12 delivered it.
+Arm 1 → Arm 2: instruction only; if Arm 2 recovers a large part of the gap, the cost
+was unfamiliarity; if it recovers none, the cost is the primitive set. Arm 2 is the
+arm that would be *deployed*, since nobody would ship the restriction without
+telling the agent how to work in it, so it is arguably the fairer treatment.
+
+**Naming.** `arm2` was the retired scoped-`sed` arm (D18), one August run stamped
+`arm2-scoped-sed` on a stale fingerprint. `census.collect` now skips arm names not
+in `ARMS`, so the two cannot merge by prefix; the old run stays in `runs/` as
+history. The runbook's earlier advice not to revive the name is overridden here
+deliberately: the new arm is a different condition with a different suffix, and the
+number was free.
+
+**Fingerprint** `10c5e789bf69` → `4dc433728f1b` (D30 in `canon.py`, D31's field and
+ARM2 in `policy.py`). The fingerprint batch before the experiment now holds D29,
+D30, D31.
+
+372 tests pass, 68 new across D30 and D31.

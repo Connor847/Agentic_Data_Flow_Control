@@ -100,6 +100,13 @@ class Arm:
     #: global substitution; not requiring it permits `sed -i 'd' f` to empty a file.
     #: Current default: require an address for destructive commands (d) only.
     sed_require_address_for_delete: bool = True
+    #: D31 - which system prompt the arm gets. "baseline": the plain prompt (Arm 0).
+    #: "informed": D12's table of permitted commands (Arm 1). "playbook": D12's table
+    #: plus explicit guardrails, recipes for edits of every size, and a refusal ->
+    #: substitute map (Arm 2). The classifier ignores this field; only solver.py reads
+    #: it. Arms 1 and 2 are therefore identical on every gated command and differ in
+    #: exactly one thing: what the model was told.
+    prompt_profile: str = "informed"
 
     def admits(self, base: str) -> bool:
         return base in self.primitives or base in INFRA_ALLOWLIST
@@ -112,6 +119,7 @@ ARM0 = Arm(
     mode="observe",
     primitives=frozenset(),      # irrelevant in observe mode; nothing is gated
     allow_rewrite=False,
+    prompt_profile="baseline",
 )
 
 #: Arm 1 - the policed primitive set: four primitives, restricted awk (D3),
@@ -123,13 +131,25 @@ ARM1 = Arm(
     allow_sed_inplace=True,
 )
 
-# Arm 2 - retired (D18). It was Arm 1 plus address-scoped `sed -i`; moving `sed -i`
-# into Arm 1 left the two byte-identical, so it tests nothing. The whole-file-rewrite
-# tax it existed to price is no longer measured - see D18 for what that costs.
-# `sed_admissible()` is unchanged; it now gates Arm 1.
+#: Arm 2 (D31) - Arm 1's policy, byte for byte, plus the playbook prompt: guardrails
+#: stated up front, a recipe for each size of edit, and a refusal -> substitute map so
+#: a denial is recoverable in one turn rather than several. The Arm 1 -> Arm 2 delta
+#: prices how much of the restriction's cost is *unfamiliarity* rather than the
+#: primitive set itself.
+#:
+#: The name `arm2` was used once before, for the scoped-`sed` arm retired in D18
+#: (`arm2-scoped-sed`, one August run under a stale fingerprint). The census keys on
+#: prefix; `census.collect` skips arm names that are not in ARMS so the two never mix.
+ARM2 = Arm(
+    name="arm2-playbook",
+    mode="enforce",
+    primitives=ARM1.primitives,
+    allow_sed_inplace=True,
+    prompt_profile="playbook",
+)
 
-ARMS: dict[str, Arm] = {a.name: a for a in (ARM0, ARM1)}
-ARMS.update({"arm0": ARM0, "arm1": ARM1})
+ARMS: dict[str, Arm] = {a.name: a for a in (ARM0, ARM1, ARM2)}
+ARMS.update({"arm0": ARM0, "arm1": ARM1, "arm2": ARM2})
 
 
 # --------------------------------------------------------------------------
@@ -381,7 +401,7 @@ __all__ = [
     "Arm", "ARMS", "ARM0", "ARM1",
     "PRIMITIVE_VERBS", "INFRA_ALLOWLIST",
     "GIT_ALLOWED_SUBCOMMANDS", "GIT_NETWORK_SUBCOMMANDS", "PYTHON_NAMES",
-    "awk_admissible", "sed_admissible", "curl_form",
+    "awk_admissible", "sed_admissible", "curl_form", "ARM2",
     "CURL_EGRESS_FLAGS", "CURL_SINK_FLAGS", "CURL_OPAQUE_FLAGS",
     "HARD_DENY", "DENY_TOOLS",
 ]
